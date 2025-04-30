@@ -10,7 +10,6 @@ from sklearn.decomposition import PCA
 from streamlit import session_state as state
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
 from PIL import Image
-from google import genai
 import io
 import sys
 
