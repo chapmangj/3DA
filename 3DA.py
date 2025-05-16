@@ -14,6 +14,10 @@ from google import genai
 import io
 import sys
 
+# Import the Google generative AI client – make sure to install with:
+# pip install google-generativeai
+import google.generativeai as palm
+
 
 # =============================================================================
 # INIT SESSION STATE VARIABLES
