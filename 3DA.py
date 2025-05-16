@@ -10,14 +10,9 @@ from sklearn.decomposition import PCA
 from streamlit import session_state as state
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
 from PIL import Image
-from google import genai
 import io
 import sys
 
-
-
-# Import the Google generative AI client – make sure to install with:
-# pip install google-generativeai
 import google.generativeai as palm
 
 # =============================================================================
