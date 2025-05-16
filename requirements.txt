@@ -6,3 +6,4 @@ google-generativeai
 scikit-learn
 Pillow
 matplotlib
+SHAP
