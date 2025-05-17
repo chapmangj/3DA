@@ -80,6 +80,7 @@ st.markdown("<h1 style='text-align: center;'>Exploratory Data Analysis and Visua
 # Add LLM API key input to sidebar
 with st.sidebar:
     st.markdown("<h3>LLM Integration</h3>", unsafe_allow_html=True)
+    # Input for the API key
     google_api_key = st.text_input(
         "Enter your Google API Key", 
         type="password", 
@@ -88,6 +89,16 @@ with st.sidebar:
     )
     if google_api_key:
         st.session_state.google_api_key = google_api_key
+
+    # New input for specifying the model name
+    google_model = st.text_input(
+        "Enter the Google AI Model", 
+        value="gemini-2.5-flash-preview-04-17",  # default value if nothing is provided
+        help="Enter the Google AI model you want to use for LLM integration",
+        key="google_model_input"
+    )
+    if google_model:
+        st.session_state.google_model = google_model
     
     st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -2927,7 +2938,7 @@ with tab_llm:
                         # Get LLM response
                         client = genai.Client(api_key=st.session_state.google_api_key)
                         response = client.models.generate_content(
-                            model="gemini-2.5-pro-exp-03-25",
+                            model=st.session_state.google_model,  # dynamically use the user input
                             contents=prompt
                         )
                         
@@ -2989,7 +3000,7 @@ with tab_llm:
                             # Get LLM response
                             client = genai.Client(api_key=st.session_state.google_api_key)
                             response = client.models.generate_content(
-                                model="gemini-2.5-pro-exp-03-25",
+                                model="gemini-2.5-flash-preview-04-17",
                                 contents=follow_up_prompt
                             )
                             
@@ -3075,7 +3086,7 @@ Just write clean Python code that can be directly executed.
                     client = genai.Client(api_key=st.session_state.google_api_key)
                     # Standard method call
                     response = client.models.generate_content(
-                        model="gemini-2.5-pro-exp-03-25", # Using a faster model, you can replace with "gemini-2.5-pro-exp-03-25" for more complex analysis
+                        model="gemini-2.5-flash-preview-04-17", # Using a faster model, you can replace with "gemini-2.5-flash-preview-04-17" for more complex analysis
                         contents=prompt
                     )
                     raw_code = response.text or ""
