@@ -1,14 +1,19 @@
+import alibi
+from alibi.explainers import KernelShap, AnchorTabular
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import matplotlib.pyplot as plt
 from plotly.subplots import make_subplots
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from streamlit import session_state as state
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
+from sklearn.ensemble import RandomForestRegressor
 from PIL import Image
 from google import genai
 import io
@@ -93,7 +98,6 @@ with st.sidebar:
     # New input for specifying the model name
     google_model = st.text_input(
         "Enter the Google AI Model", 
-        value="gemini-2.5-flash-preview-04-17",  # default value if nothing is provided
         help="Enter the Google AI model you want to use for LLM integration",
         key="google_model_input"
     )
@@ -1712,80 +1716,106 @@ def generate_summary_prompt(user_context=""):
 # =============================================================================
 # MAIN APP: TABS
 
-tab_data, tab_viz, tab_stats, tab_clustering, tab_shap, tab_llm, tab_qa, tab_download = st.tabs([
-    "Data Loading", "Visualisations", "Statistics", "Clustering", "SHAP", "AI GEO Summary", "Data Analysis Playground", "Export Data"
+tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
+    "Data Loading", "Visualisations", "Statistics", "Clustering", "ML Explain", "AI GEO Summary", "Data Analysis Playground", "Export Data"
 ])
 
-with tab_shap:
-    st.header("SHAP Analysis")
-    st.write("SHAP (SHapley Additive exPlanations) is a method to explain the output of machine learning models.")
-    st.write("It provides insights into the contribution of each feature to the model's predictions.")
+
+
+# =============================================================================
+# ML Explain Tab 
+# =============================================================================
+with tab_ml_explain: 
+    st.header("ML Explain")
+    st.write("This tab allows you to run SHAP analysis for model explanations, using an element as the target.")
+
     if st.session_state.merged_df is None:
         st.warning("Please load data first in the Data Loading tab.")
     else:
-        # Select the target element for the SHAP analysis (if available)
-        if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
+        st.subheader("SHAP Analysis Options")
+
+        target_element = None
+        if hasattr(st.session_state, 'analysis_mode') and \
+           st.session_state.analysis_mode in ["collar_assay", "all"] and \
+           hasattr(st.session_state, 'element_cols') and st.session_state.element_cols:
             target_element = st.selectbox("Select target element for SHAP analysis", st.session_state.element_cols)
         else:
-            st.error("No elemental data available for SHAP analysis.")
-            target_element = None
+            st.error("Elemental data is not available or analysis mode is not set appropriately for SHAP analysis.")
 
-        # Let the user choose to run SHAP on all data or a specified subset
         subset_option = st.radio("Select data subset for SHAP analysis", ("All Data", "Specific Cluster", "Specific Lithology"))
-
         shap_df = st.session_state.merged_df.copy()
+
         if subset_option == "Specific Cluster":
             if "Cluster" in shap_df.columns:
-                clusters = sorted(shap_df["Cluster"].unique())
+                clusters = sorted(shap_df["Cluster"].astype(str).unique())
                 selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
-                shap_df = shap_df[shap_df["Cluster"].isin(selected_clusters)]
+                shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
             else:
                 st.warning("No clustering data available. Running SHAP on all data.")
         elif subset_option == "Specific Lithology":
             if "LITHO" in shap_df.columns:
-                lithos = sorted(shap_df["LITHO"].unique())
+                lithos = sorted(shap_df["LITHO"].astype(str).unique())
                 selected_lithos = st.multiselect("Select lithologies", lithos, default=lithos)
-                shap_df = shap_df[shap_df["LITHO"].isin(selected_lithos)]
+                shap_df = shap_df[shap_df["LITHO"].astype(str).isin(selected_lithos)]
             else:
                 st.warning("No lithology data available. Running SHAP on all data.")
 
         if target_element:
-            # Prepare the model features by excluding non‐numeric or identifier columns
-            exclude_cols = ['HOLE_ID', 'FROM', 'TO', 'EASTING', 'NORTHING', 'ELEVATION', 'DIP', 'AZIMUTH', 
-                            'MIDPOINT', 'dx', 'dy', 'dz', 'x', 'y', 'z', 'LITHO', 'Cluster']
-            model_cols = [col for col in shap_df.columns 
-                          if col not in exclude_cols 
-                          and np.issubdtype(shap_df[col].dtype, np.number) 
-                          and col != target_element]
-            if len(model_cols) == 0:
-                st.error("No suitable features available for SHAP analysis.")
-            else:
-                st.subheader("Training Model for SHAP Analysis")
-                st.write("Target: " + target_element)
-                from sklearn.ensemble import RandomForestRegressor
-                X = shap_df[model_cols].fillna(0)
-                y = shap_df[target_element].fillna(0)
-                model = RandomForestRegressor(n_estimators=100, random_state=42)
-                model.fit(X, y)
-                st.success("Model trained successfully.")
+            if st.button("Run SHAP Analysis"):
+                exclude_cols = ['HOLE_ID', 'FROM', 'TO', 'EASTING', 'NORTHING', 'ELEVATION', 'DIP', 'AZIMUTH',
+                                'MIDPOINT', 'dx', 'dy', 'dz', 'x', 'y', 'z', 'LITHO', 'Cluster']
+                
+                model_cols = [col for col in shap_df.columns
+                              if col not in exclude_cols
+                              and pd.api.types.is_numeric_dtype(shap_df[col])
+                              and col != target_element]
+                
+                if not model_cols:
+                    st.error("No suitable features available for SHAP analysis after filtering.")
+                elif target_element not in shap_df.columns:
+                     st.error(f"Target element '{target_element}' not found in the dataframe.")
+                elif shap_df[model_cols].empty or shap_df[target_element].empty:
+                    st.error("Feature set or target data is empty after subsetting. Cannot train model.")
+                else:
+                    st.subheader("Training Model for SHAP Analysis")
+                    st.write(f"Target: {target_element}")
+                    st.write(f"Number of features: {len(model_cols)}")
+                    st.write(f"Number of samples: {len(shap_df)}")
 
-                st.subheader("Computing SHAP Values")
-                import shap
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X)
+                    from sklearn.ensemble import RandomForestRegressor
+                    
+                    X = shap_df[model_cols].fillna(0)
+                    y = shap_df[target_element].fillna(0)
 
-                st.subheader("SHAP Summary Plot (Bar)")
-                import matplotlib.pyplot as plt
-                fig, ax = plt.subplots(figsize=(10, 6))
-                # Use bar-type summary plot
-                shap.summary_plot(shap_values, X, plot_type="bar", show=False)
-                st.pyplot(fig)
+                    if X.empty:
+                        st.error("Feature data (X) is empty. Cannot train model.")
+                    else:
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X, y)
+                        st.success("Model trained successfully.")
 
-                st.subheader("SHAP Beeswarm Plot")
-                fig2, ax2 = plt.subplots(figsize=(10, 6))
-                shap.summary_plot(shap_values, X, show=False)
-                st.pyplot(fig2)
+                        st.subheader("Computing SHAP Values")
+                        import shap # Keep import here
+                        explainer = shap.TreeExplainer(model)
+                        shap_values = explainer.shap_values(X)
 
+                        # --- Corrected SHAP Plotting ---
+                        st.subheader("SHAP Summary Plot (Bar)")
+                        # Create a figure and axes. SHAP will use the current active axes.
+                        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
+                        shap.summary_plot(shap_values, X, plot_type="bar", show=False) # Removed ax=ax_bar
+                        st.pyplot(fig_bar)
+
+                        st.subheader("SHAP Beeswarm Plot")
+                        # Create a new figure and axes for the next plot.
+                        fig_beeswarm, ax_beeswarm = plt.subplots(figsize=(10, 6))
+                        shap.summary_plot(shap_values, X, show=False) # Removed ax=ax_beeswarm. Default plot_type is 'dot' (beeswarm).
+                        st.pyplot(fig_beeswarm)
+                        # --- End Corrected SHAP Plotting ---
+
+        elif not target_element and st.session_state.merged_df is not None:
+             st.info("Please select a target element to proceed with SHAP analysis.")
+                                    
 with tab_data:
     st.header("Data Loading")
     file_format = st.radio(
