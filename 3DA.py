@@ -1716,7 +1716,6 @@ tab_data, tab_viz, tab_stats, tab_clustering, tab_shap, tab_llm, tab_qa, tab_dow
     "Data Loading", "Visualisations", "Statistics", "Clustering", "SHAP", "AI GEO Summary", "Data Analysis Playground", "Export Data"
 ])
 
-# ----- ADD THE NEW SHAP TAB BELOW. Do not change any other code -----
 with tab_shap:
     st.header("SHAP Analysis")
     st.write("SHAP (SHapley Additive exPlanations) is a method to explain the output of machine learning models.")
