@@ -1,6 +1,3 @@
-import alibi
-from alibi.explainers import KernelShap, AnchorTabular
-
 import streamlit as st
 import pandas as pd
 import numpy as np
