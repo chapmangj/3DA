@@ -3,18 +3,19 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import matplotlib.pyplot as plt
 from plotly.subplots import make_subplots
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from streamlit import session_state as state
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
-from sklearn.ensemble import RandomForestRegressor
 from PIL import Image
 from google import genai
 import io
 import sys
+import os
+import matplotlib.pyplot as plt
+
 
 
 
@@ -56,6 +57,8 @@ if 'significant_intervals' not in st.session_state:
     st.session_state.significant_intervals = None
 if 'google_api_key' not in st.session_state:
     st.session_state.google_api_key = None
+
+
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -106,6 +109,8 @@ with st.sidebar:
 # =============================================================================
 # DATA READING & PROCESSING FUNCTIONS
 # =============================================================================
+
+
 def read_csv(file, format_type):
     """Read CSV files with standard or mining format"""
     try:
@@ -1718,118 +1723,73 @@ tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, t
 ])
 
 
-
 # =============================================================================
-# ML Explain Tab 
+# DATA LOADING TAB
 # =============================================================================
-with tab_ml_explain: 
-    st.header("ML Explain")
-    st.write("This tab allows you to run SHAP analysis for model explanations, using an element as the target.")
-
-    if st.session_state.merged_df is None:
-        st.warning("Please load data first in the Data Loading tab.")
-    else:
-        st.subheader("SHAP Analysis Options")
-
-        target_element = None
-        if hasattr(st.session_state, 'analysis_mode') and \
-           st.session_state.analysis_mode in ["collar_assay", "all"] and \
-           hasattr(st.session_state, 'element_cols') and st.session_state.element_cols:
-            target_element = st.selectbox("Select target element for SHAP analysis", st.session_state.element_cols)
-        else:
-            st.error("Elemental data is not available or analysis mode is not set appropriately for SHAP analysis.")
-
-        subset_option = st.radio("Select data subset for SHAP analysis", ("All Data", "Specific Cluster", "Specific Lithology"))
-        shap_df = st.session_state.merged_df.copy()
-
-        if subset_option == "Specific Cluster":
-            if "Cluster" in shap_df.columns:
-                clusters = sorted(shap_df["Cluster"].astype(str).unique())
-                selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
-                shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
-            else:
-                st.warning("No clustering data available. Running SHAP on all data.")
-        elif subset_option == "Specific Lithology":
-            if "LITHO" in shap_df.columns:
-                lithos = sorted(shap_df["LITHO"].astype(str).unique())
-                selected_lithos = st.multiselect("Select lithologies", lithos, default=lithos)
-                shap_df = shap_df[shap_df["LITHO"].astype(str).isin(selected_lithos)]
-            else:
-                st.warning("No lithology data available. Running SHAP on all data.")
-
-        if target_element:
-            if st.button("Run SHAP Analysis"):
-                exclude_cols = ['HOLE_ID', 'FROM', 'TO', 'EASTING', 'NORTHING', 'ELEVATION', 'DIP', 'AZIMUTH',
-                                'MIDPOINT', 'dx', 'dy', 'dz', 'x', 'y', 'z', 'LITHO', 'Cluster']
-                
-                model_cols = [col for col in shap_df.columns
-                              if col not in exclude_cols
-                              and pd.api.types.is_numeric_dtype(shap_df[col])
-                              and col != target_element]
-                
-                if not model_cols:
-                    st.error("No suitable features available for SHAP analysis after filtering.")
-                elif target_element not in shap_df.columns:
-                     st.error(f"Target element '{target_element}' not found in the dataframe.")
-                elif shap_df[model_cols].empty or shap_df[target_element].empty:
-                    st.error("Feature set or target data is empty after subsetting. Cannot train model.")
-                else:
-                    st.subheader("Training Model for SHAP Analysis")
-                    st.write(f"Target: {target_element}")
-                    st.write(f"Number of features: {len(model_cols)}")
-                    st.write(f"Number of samples: {len(shap_df)}")
-
-                    from sklearn.ensemble import RandomForestRegressor
-                    
-                    X = shap_df[model_cols].fillna(0)
-                    y = shap_df[target_element].fillna(0)
-
-                    if X.empty:
-                        st.error("Feature data (X) is empty. Cannot train model.")
-                    else:
-                        model = RandomForestRegressor(n_estimators=100, random_state=42)
-                        model.fit(X, y)
-                        st.success("Model trained successfully.")
-
-                        st.subheader("Computing SHAP Values")
-                        import shap # Keep import here
-                        explainer = shap.TreeExplainer(model)
-                        shap_values = explainer.shap_values(X)
-
-                        # --- Corrected SHAP Plotting ---
-                        st.subheader("SHAP Summary Plot (Bar)")
-                        # Create a figure and axes. SHAP will use the current active axes.
-                        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
-                        shap.summary_plot(shap_values, X, plot_type="bar", show=False) # Removed ax=ax_bar
-                        st.pyplot(fig_bar)
-
-                        st.subheader("SHAP Beeswarm Plot")
-                        # Create a new figure and axes for the next plot.
-                        fig_beeswarm, ax_beeswarm = plt.subplots(figsize=(10, 6))
-                        shap.summary_plot(shap_values, X, show=False) # Removed ax=ax_beeswarm. Default plot_type is 'dot' (beeswarm).
-                        st.pyplot(fig_beeswarm)
-                        # --- End Corrected SHAP Plotting ---
-
-        elif not target_element and st.session_state.merged_df is not None:
-             st.info("Please select a target element to proceed with SHAP analysis.")
-                                    
 with tab_data:
     st.header("Data Loading")
+    
+    # --- Demo Data Button Section ---
+    if "demo_files_loaded" not in st.session_state:
+        st.session_state.demo_files_loaded = False
+
+    if not st.session_state.demo_files_loaded:
+        if st.button("Load Demo Data"):
+            demo_data_folder = "demo_data"
+            default_format = "Geological Survey Format (Headers in H1000)"
+            
+            collar_file_path = os.path.join(demo_data_folder, "Drill_hole_location.csv")
+            assay_file_path = os.path.join(demo_data_folder, "Drill_hole_geochemistry.csv")
+            litho_file_path = os.path.join(demo_data_folder, "Drill_hole_lithology.csv")
+            litho_dict_file_path = os.path.join(demo_data_folder, "Drill_hole_lithology_dictionary.csv")
+            
+            with open(collar_file_path, "rb") as f:
+                demo_collar = io.BytesIO(f.read())
+                demo_collar.name = "Drill_hole_location.csv"
+                st.session_state.demo_collar_file = demo_collar
+            with open(assay_file_path, "rb") as f:
+                demo_assay = io.BytesIO(f.read())
+                demo_assay.name = "Drill_hole_geochemistry.csv"
+                st.session_state.demo_assay_file = demo_assay
+            with open(litho_file_path, "rb") as f:
+                demo_litho = io.BytesIO(f.read())
+                demo_litho.name = "Drill_hole_lithology.csv"
+                st.session_state.demo_litho_file = demo_litho
+            with open(litho_dict_file_path, "rb") as f:
+                demo_litho_dict = io.BytesIO(f.read())
+                demo_litho_dict.name = "Drill_hole_lithology_dictionary.csv"
+                st.session_state.demo_litho_dict_file = demo_litho_dict
+            
+            st.session_state.demo_files_loaded = True
+            st.success("Demo data loaded successfully!")
+            # Rerun the app if possible; otherwise, instruct the user to refresh.
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+            else:
+                st.write("Please refresh the app for demo data to load.")
+
+    # --- File Uploader or Demo Data ---
+    if st.session_state.get("demo_files_loaded", False):
+        collar_file = st.session_state.demo_collar_file
+        assay_file = st.session_state.demo_assay_file
+        litho_file = st.session_state.demo_litho_file
+        litho_dict_file = st.session_state.demo_litho_dict_file
+    else:
+        collar_file = st.file_uploader("Upload Collar File (CSV)", type=["csv"], key="collar_uploader")
+        assay_file = st.file_uploader("Upload Assay File (CSV)", type=["csv"], key="assay_uploader")
+        litho_file = st.file_uploader("Upload Lithology File (CSV)", type=["csv"], key="litho_uploader")
+        litho_dict_file = st.file_uploader("Upload Lithology Dictionary File (CSV)", type=["csv"], key="litho_dict_uploader")
+    
+    # --- CSV format radio button with Geological Survey Format as default ---
     file_format = st.radio(
         "Select CSV File Format",
-        ("Standard CSV (Headers in row 1)", "Geological Survey Format (Headers in H1000)")
+        ("Standard CSV (Headers in row 1)", "Geological Survey Format (Headers in H1000)"),
+        index=1  # Default to Geological Survey Format
     )
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        collar_file = st.file_uploader("Upload Collar File (CSV)", type=['csv'])
-    with col2:
-        assay_file = st.file_uploader("Upload Assay File (CSV)", type=['csv'])
-    with col3:
-        litho_file = st.file_uploader("Upload Lithology File (CSV)", type=['csv'])
-        litho_dict_file = st.file_uploader("Upload Lithology Dictionary File (CSV)", type=['csv'])
-
-    if (collar_file is not None and collar_file != st.session_state.previous_collar_file) or \
-       (assay_file is not None and assay_file != st.session_state.previous_assay_file):
+    
+    # --- Reset session state if new files are uploaded ---
+    if ((collar_file is not None and collar_file != st.session_state.get("previous_collar_file", None)) or 
+        (assay_file is not None and assay_file != st.session_state.get("previous_assay_file", None))):
         st.session_state.X_scaled = None
         st.session_state.scaler = None
         st.session_state.wcss = None
@@ -1838,6 +1798,7 @@ with tab_data:
         st.session_state.previous_collar_file = collar_file
         st.session_state.previous_assay_file = assay_file
 
+    # --- Determine valid data combinations and set analysis mode ---
     valid_data_combinations = False
     if collar_file:
         if assay_file and not litho_file:
@@ -1852,39 +1813,195 @@ with tab_data:
     else:
         st.warning("Collar file is required.")
 
+    # --- Process Data if Combination is Valid ---
     if valid_data_combinations:
+        # Initialize variables that will be passed to process_and_merge_data
+        # and st.session_state variables that might be accessed later.
+        assay_df = None
+        litho_df = None
+        st.session_state.element_cols = [] # Default to empty list
+        composite_enabled = False           # Default for compositing
+        composite_length = 1.0              # Default for compositing
+
+        # Ensure BytesIO objects (like demo files) are reset before processing
+        if collar_file is not None and hasattr(collar_file, 'seek'):
+            collar_file.seek(0)
         st.session_state.collar_df = process_collar_data(collar_file, file_format)
+
         if st.session_state.collar_df is not None:
+            # Process Assay Data if applicable
             if st.session_state.analysis_mode in ["collar_assay", "all"]:
-                assay_df, st.session_state.element_cols = process_assay_data(assay_file, file_format)
-                st.sidebar.markdown("<h1 style='font-size: 28px;'>OPTIONS</h1>", unsafe_allow_html=True)
-                st.sidebar.header("Compositing Options")
-                composite_enabled = st.sidebar.checkbox("Composite geochemical data")
-                composite_length = 1.0
-                if composite_enabled:
-                    composite_length = st.sidebar.slider("Composite Interval (m)", min_value=1, max_value=10, value=2)
-            else:
-                assay_df = None
-            litho_df = None
+                if assay_file is not None and hasattr(assay_file, 'seek'):
+                    assay_file.seek(0)
+                
+                # Call process_assay_data and get its results
+                # temp_vars are used to avoid overwriting session state until success
+                temp_assay_df, temp_element_cols = process_assay_data(assay_file, file_format)
+
+                if temp_assay_df is not None and temp_element_cols is not None:
+                    assay_df = temp_assay_df # Assign to local var for merging
+                    st.session_state.element_cols = temp_element_cols # Update session state
+                    
+                    # Compositing options in sidebar - these are shown if assay data is loaded.
+                    # Adding unique keys to prevent Streamlit's DuplicateWidgetID error.
+                    # Ideally, these sidebar elements are defined once outside this conditional block.
+                    # The st.sidebar.markdown/header for "OPTIONS" should be defined once globally in your sidebar setup.
+                    # For example:
+                    # with st.sidebar:
+                    #     st.markdown("<h1 style='font-size: 28px;'>OPTIONS</h1>", unsafe_allow_html=True)
+                    #     st.header("Compositing Options")
+                    # Then the checkbox/slider can be here:
+                    composite_enabled = st.sidebar.checkbox("Composite geochemical data", key="data_loading_composite_checkbox")
+                    if composite_enabled:
+                        composite_length = st.sidebar.slider(
+                            "Composite Interval (m)", 
+                            min_value=1.0,  # Ensure float for slider step
+                            max_value=10.0, 
+                            value=2.0, 
+                            step=0.1,       # Add step for float slider
+                            key="data_loading_composite_slider"
+                        )
+                else:
+                    # Assay processing failed or returned None, ensure defaults are used
+                    assay_df = None
+                    st.session_state.element_cols = []
+                    # composite_enabled and composite_length will use their pre-initialized defaults (False, 1.0)
+
+            # Process Lithology Data if applicable
             if st.session_state.analysis_mode in ["collar_litho", "all"]:
-                litho_df = process_litho_data(litho_file, file_format)
-                st.session_state.litho_dict = None
+                if litho_file is not None and hasattr(litho_file, 'seek'):
+                    litho_file.seek(0)
+                litho_df = process_litho_data(litho_file, file_format) # Assign to local var
+                
+                st.session_state.litho_dict = None # Reset or initialize
                 if litho_dict_file:
+                    if hasattr(litho_dict_file, 'seek'):
+                        litho_dict_file.seek(0)
                     st.session_state.litho_dict = process_litho_dict(litho_dict_file, file_format)
+            
+            # Perform merging using the local assay_df, litho_df and current session state/defaults
+            # Ensure element_cols passed is always a list
+            elements_for_merge = st.session_state.element_cols if isinstance(st.session_state.element_cols, list) else []
+
             st.session_state.merged_df, st.session_state.viz_litho_df = process_and_merge_data(
                 st.session_state.collar_df, 
-                assay_df, 
-                litho_df, 
-                st.session_state.element_cols, 
+                assay_df,  # Use the local variable
+                litho_df,  # Use the local variable
+                elements_for_merge, 
                 composite_enabled, 
                 composite_length
             )
+
             if st.session_state.merged_df is not None:
                 st.success("Data loaded and processed successfully!")
                 st.write("Preview of processed data:")
                 st.write(st.session_state.merged_df.head())
             else:
-                st.error("Failed to process data. Please check your inputs.")
+                st.error("Failed to process or merge data. Please check your inputs and file contents.")
+                # Ensure session state reflects failure if merging fails
+                st.session_state.merged_df = None 
+                st.session_state.viz_litho_df = None
+        else:
+            # Collar processing failed
+            st.error("Collar data processing failed. Cannot proceed.")
+            st.session_state.merged_df = None
+            st.session_state.viz_litho_df = None
+            st.session_state.element_cols = [] # Ensure reset
+    else:
+        st.warning("Invalid data combination. Please check that you have uploaded the required files.")
+
+
+# =============================================================================
+# ML EXPLAIN (SHAP ANALYSIS) TAB
+# =============================================================================
+with tab_ml_explain:
+    st.header("ML Explain")
+    st.write("This tab allows you to run SHAP analysis for model explanations using an element as the target.")
+    
+    # Make sure matplotlib is imported
+    import matplotlib.pyplot as plt
+    
+    if "merged_df" not in st.session_state or st.session_state.merged_df is None:
+        st.warning("Please load data first in the Data Loading tab.")
+    else:
+        st.subheader("SHAP Analysis Options")
+        
+        target_element = None
+        if (hasattr(st.session_state, 'analysis_mode') and 
+            st.session_state.analysis_mode in ["collar_assay", "all"] and 
+            hasattr(st.session_state, 'element_cols') and st.session_state.element_cols):
+            target_element = st.selectbox("Select target element for SHAP analysis", st.session_state.element_cols)
+        else:
+            st.error("Elemental data is not available or analysis mode is not set appropriately for SHAP analysis.")
+        
+        subset_option = st.radio("Select data subset for SHAP analysis", ("All Data", "Specific Cluster", "Specific Lithology"))
+        shap_df = st.session_state.merged_df.copy()
+        
+        if subset_option == "Specific Cluster":
+            if "Cluster" in shap_df.columns:
+                clusters = sorted(shap_df["Cluster"].astype(str).unique())
+                selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
+                shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
+            else:
+                st.warning("No clustering data available. Running SHAP on all data.")
+        elif subset_option == "Specific Lithology":
+            if "LITHO" in shap_df.columns:
+                lithos = sorted(shap_df["LITHO"].astype(str).unique())
+                selected_lithos = st.multiselect("Select lithologies", lithos, default=lithos)
+                shap_df = shap_df[shap_df["LITHO"].astype(str).isin(selected_lithos)]
+            else:
+                st.warning("No lithology data available. Running SHAP on all data.")
+        
+        if target_element:
+            if st.button("Run SHAP Analysis"):
+                exclude_cols = ['HOLE_ID', 'FROM', 'TO', 'EASTING', 'NORTHING', 'ELEVATION', 'DIP', 'AZIMUTH',
+                                'MIDPOINT', 'dx', 'dy', 'dz', 'x', 'y', 'z', 'LITHO', 'Cluster']
+                
+                model_cols = [col for col in shap_df.columns
+                              if col not in exclude_cols
+                              and pd.api.types.is_numeric_dtype(shap_df[col])
+                              and col != target_element]
+                
+                if not model_cols:
+                    st.error("No suitable features available for SHAP analysis after filtering.")
+                elif target_element not in shap_df.columns:
+                    st.error(f"Target element '{target_element}' not found in the dataframe.")
+                elif shap_df[model_cols].empty or shap_df[target_element].empty:
+                    st.error("Feature set or target data is empty after subsetting. Cannot train model.")
+                else:
+                    st.subheader("Training Model for SHAP Analysis")
+                    st.write(f"Target: {target_element}")
+                    st.write(f"Number of features: {len(model_cols)}")
+                    st.write(f"Number of samples: {len(shap_df)}")
+                    
+                    from sklearn.ensemble import RandomForestRegressor
+                    
+                    X = shap_df[model_cols].fillna(0)
+                    y = shap_df[target_element].fillna(0)
+                    
+                    if X.empty:
+                        st.error("Feature data (X) is empty. Cannot train model.")
+                    else:
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X, y)
+                        st.success("Model trained successfully.")
+                        
+                        st.subheader("Computing SHAP Values")
+                        import shap
+                        explainer = shap.TreeExplainer(model)
+                        shap_values = explainer.shap_values(X)
+                        
+                        st.subheader("SHAP Summary Plot (Bar)")
+                        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
+                        shap.summary_plot(shap_values, X, plot_type="bar", show=False)
+                        st.pyplot(fig_bar)
+                        
+                        st.subheader("SHAP Beeswarm Plot")
+                        fig_beeswarm, ax_beeswarm = plt.subplots(figsize=(10, 6))
+                        shap.summary_plot(shap_values, X, show=False)
+                        st.pyplot(fig_beeswarm)
+        elif st.session_state.merged_df is not None:
+             st.info("Please select a target element to proceed with SHAP analysis.")
 
 with tab_viz:
     st.header("3D Visualisation")
@@ -3024,11 +3141,20 @@ with tab_llm:
                             follow_up_prompt = f"{conversation_context}\n\nUser's follow-up question: {question}\n\nProvide a detailed, helpful response while maintaining your role as a geological expert."
                             
                             # Get LLM response
-                            client = genai.Client(api_key=st.session_state.google_api_key)
-                            response = client.models.generate_content(
-                                model="gemini-2.5-flash-preview-04-17",
-                                contents=follow_up_prompt
-                            )
+                            model_for_followup = st.session_state.get('google_model')
+                            response = None # Initialize response
+
+                            if not model_for_followup:
+                                st.error("Please ensure a Google AI Model name is entered in the sidebar for follow-up questions.")
+                                # Remove the last user message since the call won't be made
+                                if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                                    st.session_state.chat_history.pop()
+                            else:
+                                client = genai.Client(api_key=st.session_state.google_api_key)
+                                response = client.models.generate_content(
+                                    model=model_for_followup,
+                                    contents=follow_up_prompt
+                                )
                             
                             if response is not None and hasattr(response, "text") and response.text:
                                 # Add the response to chat history
@@ -3043,10 +3169,18 @@ with tab_llm:
                                 st.session_state.current_question = ""
                                 
                                 st.rerun()  # Refresh to show the new messages
-                            else:
+                            elif model_for_followup: # Only show this error if a model was specified but response was bad
                                 st.error("Received an empty response from the LLM.")
+                                # Remove the last user message if the AI failed to respond
+                                if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                                    st.session_state.chat_history.pop()
+
+
                         except Exception as e:
                             st.error(f"Error processing follow-up: {e}")
+                            # Remove the last user message on exception
+                            if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                                st.session_state.chat_history.pop()
     
     with col3:
         # Button to clear history and start over
@@ -3068,13 +3202,14 @@ with tab_llm:
     # Show explanation of what's happening
     with st.expander("How does this work?"):
         st.markdown("""
-        1. First, provide your Google Gemini API key in the sidebar and optional geological context
-        2. Click 'Generate Initial Summary' to analyze your drill hole data
-        3. The AI will create an initial interpretation based on your data
-        4. You can then ask follow-up questions or provide additional information
-        5. The system maintains the conversation context throughout your session
-        6. Click 'Clear Conversation' to start over with a fresh analysis
+        1. First, provide your Google Gemini API key and the specific Google AI Model name in the sidebar. You can also add optional geological context.
+        2. Click 'Generate Initial Summary' to analyse your drill hole data using the specified model.
+        3. The AI will create an initial interpretation based on your data.
+        4. You can then ask follow-up questions or provide additional information.
+        5. The system maintains the conversation context throughout your session.
+        6. Click 'Clear Conversation' to start over with a fresh analysis.
         """)
+
 
 with tab_qa:
     st.header("📋 Data Analysis Playground")
@@ -3109,144 +3244,160 @@ The following packages are already available: pandas as pd, numpy as np, matplot
 Just write clean Python code that can be directly executed.
 """
                 try:
-                    client = genai.Client(api_key=st.session_state.google_api_key)
-                    # Standard method call
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash-preview-04-17", # Using a faster model, you can replace with "gemini-2.5-flash-preview-04-17" for more complex analysis
-                        contents=prompt
-                    )
-                    raw_code = response.text or ""
-                    
-                    # Clean the code by removing markdown code fences and import statements
-                    code_clean = raw_code
-                    # Remove code fence start if present
-                    if "```" in code_clean:
-                        parts = code_clean.split("```")
-                        for i, part in enumerate(parts):
-                            if i % 2 == 1:  # This is inside a code fence
-                                if part.startswith("python\n"):
-                                    parts[i] = part[7:]  # Remove "python\n"
-                                elif part.startswith("python"):
-                                    parts[i] = part[6:]  # Remove "python"
-                        # Join only the parts inside code fences
-                        cleaned_parts = []
-                        for i, part in enumerate(parts):
-                            if i % 2 == 1:  # This is inside a code fence
-                                cleaned_parts.append(part)
-                        if cleaned_parts:
-                            code_clean = "\n".join(cleaned_parts)
-                    
-                    # Filter out import lines and comments
-                    code_lines = []
-                    for line in code_clean.splitlines():
-                        if (not line.strip().startswith('import ') and 
-                            not line.strip().startswith('from ') and
-                            not line.strip().startswith('#')):
-                            code_lines.append(line)
-                    
-                    code_clean = '\n'.join(code_lines).strip()
-                    
-                    st.subheader("Generated Code")
-                    st.code(code_clean, language="python")
-                    
-                    # Import visualisation libraries here
-                    import matplotlib.pyplot as plt
-                    import plotly.express as px
-                    import plotly.graph_objects as go
-                    import io
-                    from PIL import Image
-                    
-                    # Execute the cleaned code with visualisation support
-                    local_env = {"df": df.copy(), "pd": pd, "np": np, "plt": plt, "px": px, "go": go}
-                    old_stdout = sys.stdout
-                    sys.stdout = mystdout = io.StringIO()
-                    
-                    # Set matplotlib to use a non-interactive backend
-                    plt.switch_backend('Agg')
-                    
-                    # Flag to track if any content was generated
-                    content_generated = False
-                    
-                    try:
-                        exec(code_clean, {}, local_env)
-                    except Exception as exec_error:
-                        sys.stdout = old_stdout
-                        st.error(f"Error executing the code: {exec_error}")
-                        st.error("Attempting to further clean the code...")
+                    # Ensure a model is specified by the user
+                    model_to_use_qa = st.session_state.get('google_model')
+                    if not model_to_use_qa: # Checks for None or empty string
+                        st.error("Please enter a Google AI Model name in the sidebar to use this feature.")
+                    else:
+                        client = genai.Client(api_key=st.session_state.google_api_key)
+                        # Standard method call
+                        response = client.models.generate_content(
+                            model=model_to_use_qa, 
+                            contents=prompt
+                        )
+                        raw_code = response.text or ""
                         
-                        # More aggressive cleaning for code with fences
-                        more_clean = raw_code
-                        if "```python" in more_clean:
-                            more_clean = more_clean.split("```python")[1]
-                        elif "```" in more_clean:
-                            more_clean = more_clean.split("```")[1]
+                        # Clean the code by removing markdown code fences and import statements
+                        code_clean = raw_code
+                        # Remove code fence start if present
+                        if "```" in code_clean:
+                            parts = code_clean.split("```")
+                            for i, part in enumerate(parts):
+                                if i % 2 == 1:  # This is inside a code fence
+                                    if part.startswith("python\n"):
+                                        parts[i] = part[7:]  # Remove "python\n"
+                                    elif part.startswith("python"):
+                                        parts[i] = part[6:]  # Remove "python"
+                            # Join only the parts inside code fences
+                            cleaned_parts = []
+                            for i, part in enumerate(parts):
+                                if i % 2 == 1:  # This is inside a code fence
+                                    cleaned_parts.append(part)
+                            if cleaned_parts:
+                                code_clean = "\n".join(cleaned_parts)
                         
-                        if "```" in more_clean:
-                            more_clean = more_clean.split("```")[0]
-                        
-                        # Remove import statements and comments
-                        clean_lines = []
-                        for line in more_clean.strip().splitlines():
+                        # Filter out import lines and comments
+                        code_lines = []
+                        for line in code_clean.splitlines():
                             if (not line.strip().startswith('import ') and 
                                 not line.strip().startswith('from ') and
                                 not line.strip().startswith('#')):
-                                clean_lines.append(line)
+                                code_lines.append(line)
                         
-                        more_clean = '\n'.join(clean_lines).strip()
+                        code_clean = '\n'.join(code_lines).strip()
                         
-                        st.subheader("Retrying with further cleaned code:")
-                        st.code(more_clean, language="python")
+                        st.subheader("Generated Code")
+                        st.code(code_clean, language="python")
+                        
+                        # Import visualisation libraries here
+                        import matplotlib.pyplot as plt
+                        import plotly.express as px
+                        import plotly.graph_objects as go
+                        import io
+                        # from PIL import Image # PIL.Image is not directly used for st.image with BytesIO
+
+                        # Execute the cleaned code with visualisation support
+                        local_env = {"df": df.copy(), "pd": pd, "np": np, "plt": plt, "px": px, "go": go}
+                        old_stdout = sys.stdout
+                        sys.stdout = mystdout = io.StringIO()
+                        
+                        # Set matplotlib to use a non-interactive backend
+                        plt.switch_backend('Agg')
+                        
+                        # Flag to track if any content was generated
+                        content_generated = False
                         
                         try:
-                            sys.stdout = mystdout = io.StringIO()
-                            exec(more_clean, {}, local_env)
-                        except Exception as retry_error:
-                            sys.stdout = old_stdout
-                            st.error(f"Retry also failed: {retry_error}")
-                            raise
-                    
-                    # Get text output
-                    sys.stdout = old_stdout
-                    output = mystdout.getvalue().strip()
-                    
-                    # Check for text output
-                    if output:
-                        st.subheader("Text Output")
-                        st.write(output)
-                        content_generated = True
-                    
-                    # Check for and display matplotlib figure - store figure count BEFORE displaying
-                    fig_count = len(plt.get_fignums())
-                    if fig_count > 0:
-                        st.subheader("Visualisation")
-                        fig = plt.gcf()  # Get current figure
-                        buf = io.BytesIO()
-                        fig.savefig(buf, format='png', bbox_inches='tight')
-                        buf.seek(0)
-                        st.image(buf)
-                        plt.close('all')  # Close all figures to free memory
-                        content_generated = True
-                    
-                    # Check for plotly figure in the local environment
-                    if 'fig' in local_env and hasattr(local_env['fig'], 'update_layout'):  # Ensure it's a plotly figure
-                        st.subheader("Interactive Visualisation")
-                        st.plotly_chart(local_env['fig'])
-                        content_generated = True
-                    
-                    # If no output was generated at all
-                    if not content_generated:
-                        st.warning("No output or visualisation was generated. Try rephrasing your question.")
+                            exec(code_clean, {}, local_env)
+                        except Exception as exec_error:
+                            sys.stdout = old_stdout # Restore stdout before further error handling
+                            st.error(f"Error executing the code: {exec_error}")
+                            st.error("Attempting to further clean the code...")
+                            
+                            # More aggressive cleaning for code with fences
+                            more_clean = raw_code # Start from original raw_code
+                            if "```python" in more_clean:
+                                more_clean = more_clean.split("```python", 1)[1] # Split only once
+                            elif "```" in more_clean:
+                                more_clean = more_clean.split("```", 1)[1] # Split only once
+                            
+                            if "```" in more_clean: # Check for closing fence
+                                more_clean = more_clean.rsplit("```", 1)[0] # Remove from the end
+                            
+                            # Remove import statements and comments from the more aggressively cleaned code
+                            clean_lines_retry = []
+                            for line_retry in more_clean.strip().splitlines():
+                                if (not line_retry.strip().startswith('import ') and 
+                                    not line_retry.strip().startswith('from ') and
+                                    not line_retry.strip().startswith('#')):
+                                    clean_lines_retry.append(line_retry)
+                            
+                            more_clean = '\n'.join(clean_lines_retry).strip()
+                            
+                            st.subheader("Retrying with further cleaned code:")
+                            st.code(more_clean, language="python")
+                            
+                            try:
+                                sys.stdout = mystdout = io.StringIO() # Re-assign for retry
+                                exec(more_clean, {}, local_env)
+                            except Exception as retry_error:
+                                sys.stdout = old_stdout # Restore stdout
+                                st.error(f"Retry also failed: {retry_error}")
+                                st.error("Traceback for retry:")
+                                import traceback
+                                st.code(traceback.format_exc())
+                                # Do not raise here, let the outer catch handle it or just display error
                         
+                        # Get text output
+                        sys.stdout = old_stdout # Ensure stdout is restored
+                        output = mystdout.getvalue().strip()
+                        
+                        # Check for text output
+                        if output:
+                            st.subheader("Text Output")
+                            st.write(output)
+                            content_generated = True
+                        
+                        # Check for and display matplotlib figure - store figure count BEFORE displaying
+                        # Ensure plt is the one from local_env if exec modified it, though unlikely for plt itself
+                        fig_count = len(plt.get_fignums()) 
+                        if fig_count > 0:
+                            st.subheader("Visualisation (Matplotlib)")
+                            # Iterate through all open figures if multiple were created
+                            for i in plt.get_fignums():
+                                fig_mpl = plt.figure(i) # Get figure by number
+                                buf = io.BytesIO()
+                                fig_mpl.savefig(buf, format='png', bbox_inches='tight')
+                                buf.seek(0)
+                                st.image(buf)
+                            plt.close('all')  # Close all figures to free memory
+                            content_generated = True
+                        
+                        # Check for plotly figure in the local environment
+                        if 'fig' in local_env and hasattr(local_env['fig'], 'update_layout'):  # Ensure it's a plotly figure
+                            st.subheader("Interactive Visualisation (Plotly)")
+                            st.plotly_chart(local_env['fig'])
+                            content_generated = True
+                        
+                        # If no output was generated at all
+                        if not content_generated and model_to_use_qa: # Only warn if an attempt was made
+                            st.warning("No output or visualisation was generated. The generated code might not produce direct output or the question was ambiguous. Try rephrasing your question.")
+                            
                 except Exception as e:
-                    if 'old_stdout' in locals():
+                    if 'old_stdout' in locals() and sys.stdout != old_stdout : # Check if stdout was redirected
                         sys.stdout = old_stdout
-                    st.error(f"Error in dynamic Q&A: {e}")
+                    st.error(f"An error occurred in the Data Analysis Playground: {e}")
                     st.error("Traceback:")
                     import traceback
                     st.code(traceback.format_exc())
+
         elif not st.session_state.google_api_key:
             st.info("Please enter your Google API Key in the sidebar to use this feature.")
-        
+        elif question and not st.session_state.google_model: # If question is asked but model is missing
+             if st.button("Get Answer", key="qa_button_no_model_check"): # Re-check button press
+                st.error("Please enter a Google AI Model name in the sidebar to use this feature.")
+
+
         with st.expander("Example Visualisation Questions"):
             st.markdown("""
             Try these example questions for generating visualisations:
