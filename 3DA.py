@@ -67,8 +67,8 @@ if 'google_api_key' not in st.session_state:
 # PAGE CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="3DA",
-    page_icon="🔍",
+    page_title="GeoInsights 3D",
+    page_icon="🪨",
     layout="wide"
 )
 st.markdown('<div style="position: fixed; bottom: 10px; right: 10px; font-size: 12px; color: gray;">Version 1.1</div>', unsafe_allow_html=True)
