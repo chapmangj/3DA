@@ -1731,7 +1731,7 @@ def generate_summary_prompt(user_context=""):
 # MAIN APP: TABS
 
 tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
-    "Data Loading", "3D Visualisations", "Statistics", "Clustering", "ML Explain", "AI GEO Summary", "Data Analysis Playground", "Export Data"
+    "📁 Data Loading", "📏 3D Visualisations", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground", "💾 Export Data"
 ])
 
 
