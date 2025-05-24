@@ -15,6 +15,9 @@ import io
 import sys
 import os
 import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
+
 
 
 
@@ -73,15 +76,24 @@ st.markdown('<div style="position: fixed; bottom: 10px; right: 10px; font-size: 
 # =============================================================================
 # HEADER AND LOGO
 # =============================================================================
-col1, col2, col3 = st.columns([2, 1, 2])
-with col2:
-    try:
-        logo = Image.open("3DA logo.png")
-        st.image(logo, use_container_width=True)
-    except:
-        st.write("3DA")
-st.markdown("<h1 style='text-align: center;'>Exploratory Data Analysis and Visualisation</h1>", unsafe_allow_html=True)
+try:
+    logo = Image.open("3DA logo.png")
+    # Convert to base64 for CSS embedding
+    import base64
+    from io import BytesIO
+    
+    buffered = BytesIO()
+    logo.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    
+    st.markdown(
+        f'<div style="display: flex; justify-content: center; margin-bottom: 20px;"><img src="data:image/png;base64,{img_str}" width="600"></div>',
+        unsafe_allow_html=True
+    )
+except:
+    st.markdown('<div style="text-align: center; margin-bottom: 20px;">3DA</div>', unsafe_allow_html=True)
 
+st.markdown("<h1 style='text-align: center;'>Exploratory Data Analysis and Visualisation</h1>", unsafe_allow_html=True)
 # Add LLM API key input to sidebar
 with st.sidebar:
     st.markdown("<h3>LLM Integration</h3>", unsafe_allow_html=True)
@@ -1719,7 +1731,7 @@ def generate_summary_prompt(user_context=""):
 # MAIN APP: TABS
 
 tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
-    "Data Loading", "Visualisations", "Statistics", "Clustering", "ML Explain", "AI GEO Summary", "Data Analysis Playground", "Export Data"
+    "Data Loading", "3D Visualisations", "Statistics", "Clustering", "ML Explain", "AI GEO Summary", "Data Analysis Playground", "Export Data"
 ])
 
 
@@ -1727,7 +1739,10 @@ tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, t
 # DATA LOADING TAB
 # =============================================================================
 with tab_data:
-    st.header("Data Loading")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📁 Data Loading</h2>", unsafe_allow_html=True)
+    st.markdown("Upload your data files to begin analysis or load demo data to quickly explore the app's features.")
+
+
     
     # --- Demo Data Button Section ---
     if "demo_files_loaded" not in st.session_state:
@@ -1915,7 +1930,8 @@ with tab_data:
 # ML EXPLAIN (SHAP ANALYSIS) TAB
 # =============================================================================
 with tab_ml_explain:
-    st.header("ML Explain")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🏷️ ML Explain</h2>", unsafe_allow_html=True)
+
     st.write("This tab allows you to run SHAP analysis for model explanations using an element as the target.")
     
     # Make sure matplotlib is imported
@@ -2004,7 +2020,7 @@ with tab_ml_explain:
              st.info("Please select a target element to proceed with SHAP analysis.")
 
 with tab_viz:
-    st.header("3D Visualisation")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📏 3D Visualisation</h2>", unsafe_allow_html=True)
     if st.session_state.merged_df is not None:
         original_merged_df = st.session_state.merged_df.copy()
         st.session_state.viz_df = st.session_state.merged_df.copy()
@@ -2186,7 +2202,7 @@ with tab_viz:
         st.warning("Please load data in the Data Loading tab first.")
 
 with tab_stats:
-    st.header("Statistical Analysis")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📈 Statistical Analysis</h2>", unsafe_allow_html=True)
     
     if st.session_state.merged_df is not None:
         if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
@@ -2347,7 +2363,7 @@ with tab_stats:
         st.warning("Please load data in the Data Loading tab first.")
 
 with tab_clustering:
-    st.header("Geochemical Clustering")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>⚇ Geochemical Clustering</h2>", unsafe_allow_html=True)
     if st.session_state.merged_df is not None and st.session_state.analysis_mode in ["collar_assay", "all"]:
         if 'selected_cluster_features' not in state or state.selected_cluster_features is None:
             state.selected_cluster_features = st.session_state.element_cols[:min(5, len(st.session_state.element_cols))]
@@ -2938,7 +2954,10 @@ with tab_clustering:
             st.warning("No cluster data available. Please run clustering analysis first.")
 
 with tab_download:
-    st.header("Download Data")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>💾 Download Data</h2>", unsafe_allow_html=True)
+
+
+
     if st.session_state.merged_df is not None:
         download_cols = st.columns(4)
         with download_cols[0]:
@@ -3007,8 +3026,8 @@ with tab_download:
 
 # =============================================================================
 with tab_llm:
-    st.header("AI GEO Analysis")
-    
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🤖 AI GEO Analysis</h2>", unsafe_allow_html=True)
+
     # Initialise chat history and input management in session state
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -3212,7 +3231,9 @@ with tab_llm:
 
 
 with tab_qa:
-    st.header("📋 Data Analysis Playground")
+    st.header("")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📋 Data Analysis Playground</h2>", unsafe_allow_html=True)
+
     df = st.session_state.get("merged_df")
     if df is None or df.empty:
         st.warning("Please load and process data first.")
