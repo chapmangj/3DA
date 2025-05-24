@@ -149,8 +149,8 @@ def process_collar_data(collar_file, format_type):
 
             st.subheader("Select Collar Columns")
             hole_id_col = next((col for col in collar_df.columns if 'hole' in col.lower()), None)
-            easting_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['east', 'mga_e', 'x'])), None)
-            northing_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['north', 'mga_n', 'y'])), None)
+            easting_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['easting', 'mga_e', 'x','long','longitude'])), None)
+            northing_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['northing', 'mga_n', 'y','lat','latitude'])), None)
             elevation_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['elevation', 'rl', 'z'])), None)
             dip_col = next((col for col in collar_df.columns if 'dip' in col.lower()), None)
             azimuth_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['azi', 'azimuth'])), None)
