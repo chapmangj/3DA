@@ -1025,20 +1025,20 @@ def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mod
     ))
 
 def add_lithology_visualisation(fig, viz_litho_df, viz_mode, selected_lithos=None, litho_dict=None, x_offset=0):
-    """Add lithology visualisation to the figure"""
+    """Add lithology visualisation to the figure as intervals"""
     if viz_litho_df is None or viz_litho_df.empty:
         st.warning("No lithology data available for display.")
         return
+    
     unique_lithos = viz_litho_df['LITHO'].unique()
     color_palette = px.colors.qualitative.Alphabet
     litho_colors = [color_palette[i % len(color_palette)] for i in range(len(unique_lithos))]
     litho_color_map = dict(zip(unique_lithos, litho_colors))
     legend_added = set()
-    square_size = 8
+    
     for hole_id in viz_litho_df['HOLE_ID'].unique():
         hole_data = viz_litho_df[viz_litho_df['HOLE_ID'] == hole_id].sort_values('FROM')
-        collar = hole_data.iloc[0]
-        collar_x, collar_y, collar_z = collar['EASTING'], collar['NORTHING'], collar['ELEVATION']
+        
         for _, interval in hole_data.iterrows():
             litho_code = interval['LITHO']
             litho_desc = litho_dict.get(litho_code, "") if litho_dict else ""
@@ -1046,37 +1046,52 @@ def add_lithology_visualisation(fig, viz_litho_df, viz_mode, selected_lithos=Non
             show_legend = legend_name not in legend_added
             if show_legend:
                 legend_added.add(legend_name)
-            depths = np.linspace(interval['FROM'], interval['TO'], 
-                                 num=max(2, int((interval['TO'] - interval['FROM']) / 2)))
+            
+            # Calculate 3D coordinates for FROM and TO depths
             azimuth_rad = np.radians(90 - interval['AZIMUTH'])
             dip_rad = np.radians(-interval['DIP'])
-            x_values = collar_x + depths * np.cos(dip_rad) * np.cos(azimuth_rad) + x_offset
-            y_values = collar_y + depths * np.cos(dip_rad) * np.sin(azimuth_rad)
-            z_values = collar_z - depths * np.sin(dip_rad)
+            
+            # FROM point
+            from_depth = interval['FROM']
+            from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+            from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+            from_dz = from_depth * np.sin(dip_rad)
+            from_x = interval['EASTING'] + from_dx + x_offset
+            from_y = interval['NORTHING'] + from_dy
+            from_z = interval['ELEVATION'] - from_dz
+            
+            # TO point
+            to_depth = interval['TO']
+            to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+            to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+            to_dz = to_depth * np.sin(dip_rad)
+            to_x = interval['EASTING'] + to_dx + x_offset
+            to_y = interval['NORTHING'] + to_dy
+            to_z = interval['ELEVATION'] - to_dz
+            
+            # Add thick line segment for the lithology interval
             fig.add_trace(go.Scatter3d(
-                x=x_values,
-                y=y_values,
-                z=z_values,
-                mode='markers',
-                marker=dict(
-                    symbol='square',
-                    size=square_size,
-                    color=litho_color_map[litho_code],
+                x=[from_x, to_x],
+                y=[from_y, to_y],
+                z=[from_z, to_z],
+                mode='lines',
+                line=dict(
+                    width=20,  # Thick lines for visibility
+                    color=litho_color_map[litho_code]
                 ),
                 name=legend_name,
                 legendgroup=legend_name,
                 hovertemplate=(
                     f"<b>Hole ID:</b> {hole_id}<br>" +
                     f"<b>Lithology:</b> {legend_name}<br>" +
-                    "<b>From:</b> {:.2f}<br>".format(interval['FROM']) +
-                    "<b>To:</b> {:.2f}<br>".format(interval['TO']) +
-                    "<b>X</b>: %{x:.2f}<br>" +
-                    "<b>Y</b>: %{y:.2f}<br>" +
-                    "<b>Z</b>: %{z:.2f}<br>"
+                    f"<b>From:</b> {interval['FROM']:.2f}m<br>" +
+                    f"<b>To:</b> {interval['TO']:.2f}m<br>" +
+                    f"<b>Length:</b> {interval['TO'] - interval['FROM']:.2f}m<br>" +
+                    "<extra></extra>"
                 ),
                 showlegend=show_legend
             ))
-
+            
 def add_collar_points(fig, collar_df, x_offset=0):
     """Add collar points to the figure"""
     fig.add_trace(go.Scatter3d(
@@ -1163,6 +1178,399 @@ def update_figure_layout(fig, vertical_exaggeration=1.0):
         yaxis_range=[y_min, y_max],
         zaxis_range=[z_min, z_max]
     )
+def create_drill_fence_cross_section(merged_df, viz_litho_df, collar_df, section_line_start, section_line_end, section_width, primary_element=None, use_log_scale=True, litho_dict=None):
+    """
+    Create a drill fence cross-section with lithology and grade on opposite sides of drill traces
+    """
+    
+    # Calculate section line parameters
+    start_x, start_y = section_line_start
+    end_x, end_y = section_line_end
+    
+    # Section line vector and length
+    line_dx = end_x - start_x
+    line_dy = end_y - start_y
+    line_length = np.sqrt(line_dx**2 + line_dy**2)
+    
+    if line_length == 0:
+        st.error("Section line start and end points cannot be the same")
+        return None
+    
+    # Unit vector along section line
+    line_unit_x = line_dx / line_length
+    line_unit_y = line_dy / line_length
+    
+    # Perpendicular unit vector (for distance calculation)
+    perp_unit_x = -line_unit_y
+    perp_unit_y = line_unit_x
+    
+    def point_to_line_distance_and_position(px, py):
+        """Calculate perpendicular distance from point to section line and position along line"""
+        # Vector from line start to point
+        to_point_x = px - start_x
+        to_point_y = py - start_y
+        
+        # Distance along section line (projection)
+        along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+        
+        # Perpendicular distance from line
+        perp_distance = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+        
+        return along_line, perp_distance
+    
+    # Filter data points within section width
+    section_data = []
+    for idx, row in merged_df.iterrows():
+        along_line, perp_dist = point_to_line_distance_and_position(row['x'], row['y'])
+        
+        # Check if point is within section width and along the section line
+        if (abs(perp_dist) <= section_width/2 and 
+            0 <= along_line <= line_length):
+            
+            row_dict = row.to_dict()
+            row_dict['section_distance'] = along_line  # Distance along section line
+            row_dict['perp_distance'] = perp_dist     # Distance from section line
+            section_data.append(row_dict)
+    
+    if not section_data:
+        return None
+    
+    section_df = pd.DataFrame(section_data)
+    
+    # Create the cross-section plot
+    fig = go.Figure()
+    
+    # Offset for displaying grade and lithology on opposite sides
+    grade_offset = 5  # Offset grade points to the right
+    litho_offset = -5  # Offset lithology to the left
+    
+    # Process collar points first (needed for drill traces)
+    collar_section_data = []
+    for idx, row in collar_df.iterrows():
+        along_line, perp_dist = point_to_line_distance_and_position(row['EASTING'], row['NORTHING'])
+        
+        if (abs(perp_dist) <= section_width/2 and 
+            0 <= along_line <= line_length):
+            collar_section_data.append({
+                'HOLE_ID': row['HOLE_ID'],
+                'section_distance': along_line,
+                'elevation': row['ELEVATION'],
+                'perp_distance': perp_dist
+            })
+    
+    # Create collar lookup dictionary
+    collar_section_dict = {}
+    if collar_section_data:
+        collar_section_dict = {c['HOLE_ID']: c for c in collar_section_data}
+    
+    # Add grade visualization if available
+    if primary_element and primary_element in section_df.columns:
+        hover_text = []
+        for _, row in section_df.iterrows():
+            info = [
+                f"<b>Hole ID:</b> {row['HOLE_ID']}",
+                f"<b>{primary_element}:</b> {row[primary_element]:.2f}",
+                f"<b>From:</b> {row['FROM']:.2f}m",
+                f"<b>To:</b> {row['TO']:.2f}m",
+                f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
+            ]
+            if 'LITHO' in row:
+                info.append(f"<b>Lithology:</b> {row['LITHO']}")
+            hover_text.append("<br>".join(info))
+        
+        # Color scale setup
+        color_values = section_df[primary_element]
+        min_val = section_df[primary_element].min()
+        max_val = section_df[primary_element].max()
+        
+        # Create tick values for colorbar
+        if use_log_scale and min_val > 0:
+            log_min = np.floor(np.log10(min_val))
+            log_max = np.ceil(np.log10(max_val))
+            tick_vals = []
+            tick_text = []
+            for i in range(int(log_min), int(log_max) + 1):
+                current = 10**i
+                if min_val <= current <= max_val:
+                    tick_vals.append(current)
+                    tick_text.append(f'{current:.3g}')
+            if min_val not in tick_vals:
+                tick_vals.insert(0, min_val)
+                tick_text.insert(0, f'{min_val:.2f}')
+            if max_val not in tick_vals:
+                tick_vals.append(max_val)
+                tick_text.append(f'{max_val:.2f}')
+        else:
+            tick_vals = np.linspace(min_val, max_val, 6)
+            tick_text = [f'{v:.3f}' for v in tick_vals]
+        
+        # Add grade points with offset to the right
+        fig.add_trace(go.Scatter(
+            x=section_df['section_distance'] + grade_offset,
+            y=section_df['z'],
+            mode='markers',
+            marker=dict(
+                size=15,
+                color=color_values,
+                colorscale='rdylbu',
+                reversescale=True,
+                showscale=True,
+                colorbar=dict(
+                    title=f"{primary_element} Grade",
+                    len=0.75,
+                    tickmode='array',
+                    tickvals=tick_vals,
+                    ticktext=tick_text,
+                    x=1.02
+                ),
+                cmin=min_val,
+                cmax=max_val,
+                symbol='square',  # Square markers
+            ),
+            text=hover_text,
+            hovertemplate="%{text}<extra></extra>",
+            name=f'{primary_element} Grade'
+        ))
+    
+    # Add lithology intervals if available
+    if viz_litho_df is not None:
+        litho_section_data = []
+        for idx, row in viz_litho_df.iterrows():
+            along_line, perp_dist = point_to_line_distance_and_position(row['x'], row['y'])
+            
+            if (abs(perp_dist) <= section_width/2 and 
+                0 <= along_line <= line_length):
+                
+                row_dict = row.to_dict()
+                row_dict['section_distance'] = along_line
+                row_dict['perp_distance'] = perp_dist
+                litho_section_data.append(row_dict)
+        
+        if litho_section_data:
+            litho_section_df = pd.DataFrame(litho_section_data)
+            
+            # Group by hole and create lithology intervals
+            unique_lithos = litho_section_df['LITHO'].unique()
+            color_palette = px.colors.qualitative.Set1
+            litho_colors = {litho: color_palette[i % len(color_palette)] for i, litho in enumerate(unique_lithos)}
+            
+            legend_added = set()
+            
+            for hole_id in litho_section_df['HOLE_ID'].unique():
+                hole_litho_data = litho_section_df[litho_section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+                
+                for _, interval in hole_litho_data.iterrows():
+                    litho_code = interval['LITHO']
+                    litho_desc = litho_dict.get(litho_code, "") if litho_dict else ""
+                    legend_name = f"{litho_code} {litho_desc}".strip() if litho_dict else litho_code
+                    
+                    show_legend = legend_name not in legend_added
+                    if show_legend:
+                        legend_added.add(legend_name)
+                    
+                    # Calculate interval positions in 3D space
+                    azimuth_rad = np.radians(90 - interval['AZIMUTH'])
+                    dip_rad = np.radians(-interval['DIP'])
+                    
+                    # FROM point
+                    from_depth = interval['FROM']
+                    from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                    from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                    from_dz = from_depth * np.sin(dip_rad)
+                    from_x = interval['EASTING'] + from_dx
+                    from_y = interval['NORTHING'] + from_dy
+                    from_z = interval['ELEVATION'] - from_dz
+                    
+                    # TO point
+                    to_depth = interval['TO']
+                    to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                    to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                    to_dz = to_depth * np.sin(dip_rad)
+                    to_x = interval['EASTING'] + to_dx
+                    to_y = interval['NORTHING'] + to_dy
+                    to_z = interval['ELEVATION'] - to_dz
+                    
+                    # Project onto section line
+                    from_along, _ = point_to_line_distance_and_position(from_x, from_y)
+                    to_along, _ = point_to_line_distance_and_position(to_x, to_y)
+                    
+                    # Add lithology intervals with offset to the left
+                    fig.add_trace(go.Scatter(
+                        x=[from_along + litho_offset, to_along + litho_offset],
+                        y=[from_z, to_z],
+                        mode='lines',
+                        line=dict(width=20, color=litho_colors[litho_code]),
+                        name=legend_name,
+                        legendgroup=f"litho_{legend_name}",
+                        showlegend=show_legend,
+                        hovertemplate=(
+                            f"<b>Hole:</b> {hole_id}<br>" +
+                            f"<b>Lithology:</b> {legend_name}<br>" +
+                            f"<b>From:</b> {interval['FROM']:.1f}m<br>" +
+                            f"<b>To:</b> {interval['TO']:.1f}m<br>" +
+                            "<extra></extra>"
+                        )
+                    ))
+    
+    # Add drill hole traces (center line) - START FROM COLLARS
+    for hole_id in section_df['HOLE_ID'].unique():
+        hole_data = section_df[section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+        
+        if hole_id in collar_section_dict:
+            collar_point = collar_section_dict[hole_id]
+            
+            # Start trace from collar
+            trace_points = [(collar_point['section_distance'], collar_point['elevation'])]
+            
+            # Add all sample points in order
+            for _, row in hole_data.iterrows():
+                trace_points.append((row['section_distance'], row['z']))
+            
+            # Extract x and y coordinates
+            trace_x, trace_y = zip(*trace_points)
+            
+            fig.add_trace(go.Scatter(
+                x=trace_x,
+                y=trace_y,
+                mode='lines',
+                line=dict(color='black', width=2),
+                showlegend=False,
+                hoverinfo='skip',
+                name=f'Trace {hole_id}'
+            ))
+        else:
+            # If no collar found, just connect the sample points
+            if len(hole_data) > 1:
+                fig.add_trace(go.Scatter(
+                    x=hole_data['section_distance'],
+                    y=hole_data['z'],
+                    mode='lines',
+                    line=dict(color='black', width=2),
+                    showlegend=False,
+                    hoverinfo='skip',
+                    name=f'Trace {hole_id}'
+                ))
+    
+    # Add collar points
+    if collar_section_data:
+        collar_section_df = pd.DataFrame(collar_section_data)
+        fig.add_trace(go.Scatter(
+            x=collar_section_df['section_distance'],
+            y=collar_section_df['elevation'],
+            mode='markers+text',
+            marker=dict(size=10, color='red', symbol='triangle-up'),
+            text=collar_section_df['HOLE_ID'],
+            textposition='top center',
+            textfont=dict(size=10, color='red'),
+            name='Collars',
+            hovertemplate="<b>Hole:</b> %{customdata}<br><b>Collar</b><extra></extra>",
+            customdata=collar_section_df['HOLE_ID']
+        ))
+    
+    # Calculate section azimuth for title
+    section_azimuth = np.degrees(np.arctan2(line_dx, line_dy))
+    if section_azimuth < 0:
+        section_azimuth += 360
+    
+    # Layout with annotations - MOVED LEGEND FURTHER RIGHT
+    fig.update_layout(
+        title=f"Drill Fence Cross Section - Azimuth: {section_azimuth:.1f}° - Length: {line_length:.1f}m - Width: {section_width:.1f}m",
+        xaxis_title="Distance along section (m)",
+        yaxis_title="Elevation (m)",
+        height=900,
+        width=1600,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=1.15,  # Moved further right from 1.05 to 1.15
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="rgba(0, 0, 0, 0.3)",
+            borderwidth=1
+        ),
+        margin=dict(r=300, l=50, t=80, b=50)  # Increased right margin to 300
+    )
+    
+
+    
+    return fig
+def create_section_line_map(merged_df, collar_df, section_line_start, section_line_end, section_width):
+    """Create a map showing the section line and data points"""
+    fig = go.Figure()
+    
+    # Add all drill hole locations
+    fig.add_trace(go.Scatter(
+        x=merged_df['x'],
+        y=merged_df['y'],
+        mode='markers',
+        marker=dict(size=4, color='lightblue', opacity=0.6),
+        name='All Samples',
+        hovertemplate="<b>Hole:</b> %{customdata}<extra></extra>",
+        customdata=merged_df['HOLE_ID']
+    ))
+    
+    # Add collar points
+    fig.add_trace(go.Scatter(
+        x=collar_df['EASTING'],
+        y=collar_df['NORTHING'],
+        mode='markers+text',  
+        marker=dict(size=8, color='red', symbol='circle'),  
+        text=collar_df['HOLE_ID'],  # Display hole IDs as text
+        textposition='top center',  
+        textfont=dict(size=10, color='red'),  
+        name='Collars',
+        hovertemplate="<b>Hole:</b> %{customdata}<extra></extra>",
+        customdata=collar_df['HOLE_ID']
+    ))
+    
+    # Add section line
+    fig.add_trace(go.Scatter(
+        x=[section_line_start[0], section_line_end[0]],
+        y=[section_line_start[1], section_line_end[1]],
+        mode='lines',
+        line=dict(color='red', width=4),
+        name='Section Line'
+    ))
+    
+    # Add section width boundaries
+    start_x, start_y = section_line_start
+    end_x, end_y = section_line_end
+    line_dx = end_x - start_x
+    line_dy = end_y - start_y
+    line_length = np.sqrt(line_dx**2 + line_dy**2)
+    
+    if line_length > 0:
+        # Perpendicular unit vector
+        perp_unit_x = -line_dy / line_length
+        perp_unit_y = line_dx / line_length
+        
+        # Section boundary lines
+        boundary1_start = [start_x + perp_unit_x * section_width/2, start_y + perp_unit_y * section_width/2]
+        boundary1_end = [end_x + perp_unit_x * section_width/2, end_y + perp_unit_y * section_width/2]
+        boundary2_start = [start_x - perp_unit_x * section_width/2, start_y - perp_unit_y * section_width/2]
+        boundary2_end = [end_x - perp_unit_x * section_width/2, end_y - perp_unit_y * section_width/2]
+        
+        # Add boundary lines
+        for i, (b_start, b_end) in enumerate([(boundary1_start, boundary1_end), (boundary2_start, boundary2_end)]):
+            fig.add_trace(go.Scatter(
+                x=[b_start[0], b_end[0]],
+                y=[b_start[1], b_end[1]],
+                mode='lines',
+                line=dict(color='orange', width=2, dash='dash'),
+                name='Section Width' if i == 0 else None,
+                showlegend=i == 0
+            ))
+    
+    fig.update_layout(
+        title="Section Line Location",
+        xaxis_title="Easting",
+        yaxis_title="Northing",
+        height=600,
+        width=800,
+        xaxis=dict(scaleanchor="y", scaleratio=1)
+    )
+    
+    return fig
 
 def show_statistical_analysis(merged_df, primary_element, use_log_scale):
     """Show basic stats and histogram"""
@@ -1830,7 +2238,7 @@ with tab_data:
 
     # --- Process Data if Combination is Valid ---
     if valid_data_combinations:
-        # Initialize variables that will be passed to process_and_merge_data
+        # Initialise variables that will be passed to process_and_merge_data
         # and st.session_state variables that might be accessed later.
         assay_df = None
         litho_df = None
@@ -1926,6 +2334,7 @@ with tab_data:
         st.warning("Invalid data combination. Please check that you have uploaded the required files.")
 
 
+        
 # =============================================================================
 # ML EXPLAIN (SHAP ANALYSIS) TAB
 # =============================================================================
@@ -2194,10 +2603,108 @@ with tab_viz:
             st.plotly_chart(fig)
         else:
             st.warning("Please select at least one visualisation type.")
+
+        # CROSS SECTION FUNCTIONALITY - MOVED BEFORE SWATH PLOTS
+        st.markdown("---")  # Add separator
+        st.markdown("<h3 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>✂️ Drill Fence Cross Sections</h3>", unsafe_allow_html=True)
+        
+        st.markdown("### Define Drill Fence Section")
+        st.write("Select drill holes to create a fence section. Lithology will display on the left side of drill traces, grades on the right side.")
+        
+        # Get unique hole coordinates for fence selection
+        hole_coords = st.session_state.collar_df[['HOLE_ID', 'EASTING', 'NORTHING']].copy()
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.write("**Select holes to create drill fence:**")
+            selected_holes_cross = st.multiselect(
+                "Choose the first and last hole in the fence line (minimum 2 required):",
+                hole_coords['HOLE_ID'].tolist(),
+                default=hole_coords['HOLE_ID'].tolist()[:3] if len(hole_coords) >= 3 else hole_coords['HOLE_ID'].tolist(),
+                key="cross_section_holes"
+            )
+        
+        with col2:
+            # Section width
+            section_width = st.slider("Section Width (m)", min_value=10.0, max_value=200.0, value=50.0, step=10.0, key="cross_section_width")
             
+            # Element selection
+            primary_element_cross = None
+            if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
+                primary_element_cross = st.selectbox("Grade element:", st.session_state.element_cols, key="cross_section_element")
+                use_log_scale_cross = st.checkbox("Use log scale for grades", value=True, key="cross_section_log")
+        
+        if len(selected_holes_cross) >= 2:
+            fence_holes = hole_coords[hole_coords['HOLE_ID'].isin(selected_holes_cross)]
+            
+            # Use first and last holes from the selected list (no PCA sorting)
+            first_hole = fence_holes[fence_holes['HOLE_ID'] == selected_holes_cross[0]].iloc[0]
+            last_hole = fence_holes[fence_holes['HOLE_ID'] == selected_holes_cross[-1]].iloc[0]
+            
+            section_line_start = [first_hole['EASTING'], first_hole['NORTHING']]
+            section_line_end = [last_hole['EASTING'], last_hole['NORTHING']]
+            
+            st.success(f"Drill fence from **{first_hole['HOLE_ID']}** to **{last_hole['HOLE_ID']}** ({len(selected_holes_cross)} holes selected)")
+            
+            # Show section line on map
+            st.subheader("Drill Fence Location")
+            map_fig = create_section_line_map(
+                st.session_state.merged_df, 
+                st.session_state.collar_df,
+                section_line_start, 
+                section_line_end, 
+                section_width
+            )
+            
+            # Highlight selected holes on the map
+            selected_hole_coords = hole_coords[hole_coords['HOLE_ID'].isin(selected_holes_cross)]
+            map_fig.add_trace(go.Scatter(
+                x=selected_hole_coords['EASTING'],
+                y=selected_hole_coords['NORTHING'],
+                mode='markers+text',
+                marker=dict(size=12, color='blue', symbol='triangle-up'),
+                name='Selected Holes',
+                hovertemplate="<b>Selected Hole:</b> %{text}<extra></extra>"
+            ))
+            
+            st.plotly_chart(map_fig, use_container_width=True)
+            
+            # Generate cross-section
+            if st.button("Generate Drill Fence Cross Section", type="primary", key="generate_cross_section"):
+                with st.spinner("Generating drill fence cross-section..."):
+                    fig_cross = create_drill_fence_cross_section(
+                        st.session_state.merged_df,
+                        st.session_state.viz_litho_df,
+                        st.session_state.collar_df,
+                        section_line_start,
+                        section_line_end,
+                        section_width,
+                        primary_element_cross,
+                        use_log_scale_cross if 'use_log_scale_cross' in locals() else True,
+                        st.session_state.litho_dict
+                    )
+                    
+                    if fig_cross:
+                        st.subheader("Drill Fence Cross Section")
+                        st.plotly_chart(fig_cross, use_container_width=True)
+                        
+                        # Add some explanatory text
+                        st.info("📍 **Reading the Cross Section:**\n"
+                               "- **Black lines** = Drill hole traces\n"
+                               "- **Left side (coloured bars)** = Lithology intervals\n" 
+                               "- **Right side (coloured dots)** = Grade values\n"
+                               "- **Red triangles** = Collar locations with hole IDs")
+                    else:
+                        st.warning("No data found in the specified drill fence area. Try adjusting the section width or selecting different holes.")
+        else:
+            st.warning("⚠️ Please select at least 2 holes to create a drill fence section.")
+
+        # SWATH PLOTS 
         if st.session_state.analysis_mode in ["collar_assay", "all"] and 'primary_element' in locals():
             if not st.session_state.merged_df.empty:
                 create_swath_plots(st.session_state.merged_df, primary_element, use_log_scale)
+            
     else:
         st.warning("Please load data in the Data Loading tab first.")
 
@@ -2948,6 +3455,436 @@ with tab_clustering:
                             add_collar_points(fig, viz_collar_df, x_offset=offsets["Lithology"])
                     update_figure_layout(fig, vertical_exaggeration)
                     st.plotly_chart(fig, key="previous_cluster_viz_plot")
+                    
+
+                    st.markdown("---")  
+                    st.markdown("<h4 style='color: #2a5298;'>✂️ Cluster Cross Sections</h4>", unsafe_allow_html=True)
+                    
+                    st.write("Create cross sections showing cluster distribution along drill fence lines.")
+                    
+                    # Get unique hole coordinates for fence selection
+                    hole_coords_cluster = st.session_state.collar_df[['HOLE_ID', 'EASTING', 'NORTHING']].copy()
+                    
+                    col1_cluster, col2_cluster = st.columns([2, 1])
+                    
+                    with col1_cluster:
+                        st.write("**Select holes for cluster cross section:**")
+                        selected_holes_cluster_cross = st.multiselect(
+                            "Choose holes for fence line (minimum 2 required):",
+                            hole_coords_cluster['HOLE_ID'].tolist(),
+                            default=hole_coords_cluster['HOLE_ID'].tolist()[:3] if len(hole_coords_cluster) >= 3 else hole_coords_cluster['HOLE_ID'].tolist(),
+                            key="cluster_cross_section_holes"
+                        )
+                    
+                    with col2_cluster:
+                        # Section width
+                        section_width_cluster = st.slider("Section Width (m)", min_value=10.0, max_value=200.0, value=50.0, step=10.0, key="cluster_cross_section_width")
+                        
+                        # Additional display options
+                        show_lithology = False
+                        show_grades = False
+                        primary_element_cluster_cross = None
+                        use_log_scale_cluster_cross = True
+                        
+                        # Check if lithology data is available
+                        if (st.session_state.viz_litho_df is not None and 
+                            not st.session_state.viz_litho_df.empty and 
+                            'LITHO' in st.session_state.merged_df.columns):
+                            show_lithology = st.checkbox("Show lithology (left side)", value=True, key="cluster_cross_show_litho")
+                        
+                        if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
+                            show_grades = st.checkbox("Show grades (right side)", value=False, key="cluster_cross_show_grades")
+                            if show_grades:
+                                primary_element_cluster_cross = st.selectbox("Grade element:", st.session_state.element_cols, key="cluster_cross_section_element")
+                                use_log_scale_cluster_cross = st.checkbox("Use log scale for grades", value=True, key="cluster_cross_section_log")
+                    
+                    if len(selected_holes_cluster_cross) >= 2:
+                        fence_holes_cluster = hole_coords_cluster[hole_coords_cluster['HOLE_ID'].isin(selected_holes_cluster_cross)]
+                        
+                        # Use first and last holes from the selected list
+                        first_hole_cluster = fence_holes_cluster[fence_holes_cluster['HOLE_ID'] == selected_holes_cluster_cross[0]].iloc[0]
+                        last_hole_cluster = fence_holes_cluster[fence_holes_cluster['HOLE_ID'] == selected_holes_cluster_cross[-1]].iloc[0]
+                        
+                        section_line_start_cluster = [first_hole_cluster['EASTING'], first_hole_cluster['NORTHING']]
+                        section_line_end_cluster = [last_hole_cluster['EASTING'], last_hole_cluster['NORTHING']]
+                        
+                        st.success(f"Cluster cross section from **{first_hole_cluster['HOLE_ID']}** to **{last_hole_cluster['HOLE_ID']}** ({len(selected_holes_cluster_cross)} holes selected)")
+                        
+                        # Show section line on map
+                        st.subheader("Cross Section Location")
+                        map_fig_cluster = create_section_line_map(
+                            st.session_state.merged_df, 
+                            st.session_state.collar_df,
+                            section_line_start_cluster, 
+                            section_line_end_cluster, 
+                            section_width_cluster
+                        )
+                        
+                        # Highlight selected holes and color by cluster if available
+                        if 'Cluster' in st.session_state.merged_df.columns:
+                            # Add cluster information to the map
+                            cluster_hole_info = st.session_state.merged_df.groupby('HOLE_ID')['Cluster'].agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else -1).reset_index()
+                            selected_hole_coords_cluster = hole_coords_cluster[hole_coords_cluster['HOLE_ID'].isin(selected_holes_cluster_cross)]
+                            selected_hole_coords_cluster = selected_hole_coords_cluster.merge(cluster_hole_info, on='HOLE_ID', how='left')
+                            
+                            for cluster in sorted(selected_hole_coords_cluster['Cluster'].unique()):
+                                if cluster >= 0:
+                                    cluster_holes = selected_hole_coords_cluster[selected_hole_coords_cluster['Cluster'] == cluster]
+                                    map_fig_cluster.add_trace(go.Scatter(
+                                        x=cluster_holes['EASTING'],
+                                        y=cluster_holes['NORTHING'],
+                                        mode='markers+text',
+                                        marker=dict(size=12, color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)], symbol='triangle-up'),
+                                        text=cluster_holes['HOLE_ID'],
+                                        textposition='top center',
+                                        name=f'Cluster {cluster} Holes',
+                                        hovertemplate="<b>Hole:</b> %{text}<br><b>Cluster:</b> " + str(cluster) + "<extra></extra>"
+                                    ))
+                        
+                        st.plotly_chart(map_fig_cluster, use_container_width=True)
+                        
+                        # Generate cross-section
+                        if st.button("Generate Cluster Cross Section", type="primary", key="generate_cluster_cross_section"):
+                            with st.spinner("Generating cluster cross-section..."):
+                                # Create cluster cross section
+                                cluster_cross_df = st.session_state.merged_df[st.session_state.merged_df['Cluster'] >= 0].copy()
+                                
+                                # Calculate section line parameters
+                                start_x, start_y = section_line_start_cluster
+                                end_x, end_y = section_line_end_cluster
+                                line_dx = end_x - start_x
+                                line_dy = end_y - start_y
+                                line_length = np.sqrt(line_dx**2 + line_dy**2)
+                                
+                                if line_length == 0:
+                                    st.error("Section line start and end points cannot be the same")
+                                else:
+                                    # Unit vectors
+                                    line_unit_x = line_dx / line_length
+                                    line_unit_y = line_dy / line_length
+                                    perp_unit_x = -line_unit_y
+                                    perp_unit_y = line_unit_x
+                                    
+                                    # Filter data points within section width
+                                    section_data = []
+                                    for idx, row in cluster_cross_df.iterrows():
+                                        to_point_x = row['x'] - start_x
+                                        to_point_y = row['y'] - start_y
+                                        along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+                                        perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+                                        
+                                        if (abs(perp_dist) <= section_width_cluster/2 and 
+                                            0 <= along_line <= line_length):
+                                            row_dict = row.to_dict()
+                                            row_dict['section_distance'] = along_line
+                                            row_dict['perp_distance'] = perp_dist
+                                            section_data.append(row_dict)
+                                    
+                                    if section_data:
+                                        section_df = pd.DataFrame(section_data)
+                                        
+                                        # Create the cross-section plot
+                                        fig_cross_cluster = go.Figure()
+                                        
+                                        # Offset for displaying different data types
+                                        cluster_offset = 0       # Clusters on drill trace (center)
+                                        litho_offset = -5        # Lithology on left side
+                                        grade_offset = 5         # Grades on right side
+                                        
+                                        # Add lithology intervals if selected and available
+                                        if (show_lithology and 
+                                            st.session_state.viz_litho_df is not None and 
+                                            not st.session_state.viz_litho_df.empty):
+                                            
+                                            # Filter lithology data for the cross section
+                                            litho_section_data = []
+                                            for idx, row in st.session_state.viz_litho_df.iterrows():
+                                                to_point_x = row['x'] - start_x
+                                                to_point_y = row['y'] - start_y
+                                                along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+                                                perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+                                                
+                                                if (abs(perp_dist) <= section_width_cluster/2 and 
+                                                    0 <= along_line <= line_length):
+                                                    row_dict = row.to_dict()
+                                                    row_dict['section_distance'] = along_line
+                                                    row_dict['perp_distance'] = perp_dist
+                                                    litho_section_data.append(row_dict)
+                                            
+                                            if litho_section_data:
+                                                litho_section_df = pd.DataFrame(litho_section_data)
+                                                
+                                                # Group by hole and create lithology intervals
+                                                unique_lithos = litho_section_df['LITHO'].unique()
+                                                color_palette = px.colors.qualitative.Set1
+                                                litho_colors = {litho: color_palette[i % len(color_palette)] for i, litho in enumerate(unique_lithos)}
+                                                
+                                                legend_added = set()
+                                                
+                                                for hole_id in litho_section_df['HOLE_ID'].unique():
+                                                    hole_litho_data = litho_section_df[litho_section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+                                                    
+                                                    for _, interval in hole_litho_data.iterrows():
+                                                        litho_code = interval['LITHO']
+                                                        # Safe handling of litho_dict
+                                                        litho_desc = ""
+                                                        if st.session_state.litho_dict and litho_code in st.session_state.litho_dict:
+                                                            litho_desc = st.session_state.litho_dict[litho_code]
+                                                        legend_name = f"{litho_code} {litho_desc}".strip() if litho_desc else litho_code
+                                                        
+                                                        show_legend = legend_name not in legend_added
+                                                        if show_legend:
+                                                            legend_added.add(legend_name)
+                                                        
+                                                        # Calculate interval positions in 3D space
+                                                        azimuth_rad = np.radians(90 - interval['AZIMUTH'])
+                                                        dip_rad = np.radians(-interval['DIP'])
+                                                        
+                                                        # FROM point
+                                                        from_depth = interval['FROM']
+                                                        from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                                                        from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                                                        from_dz = from_depth * np.sin(dip_rad)
+                                                        from_x = interval['EASTING'] + from_dx
+                                                        from_y = interval['NORTHING'] + from_dy
+                                                        from_z = interval['ELEVATION'] - from_dz
+                                                        
+                                                        # TO point
+                                                        to_depth = interval['TO']
+                                                        to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                                                        to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                                                        to_dz = to_depth * np.sin(dip_rad)
+                                                        to_x = interval['EASTING'] + to_dx
+                                                        to_y = interval['NORTHING'] + to_dy
+                                                        to_z = interval['ELEVATION'] - to_dz
+                                                        
+                                                        # Project onto section line
+                                                        from_to_point_x = from_x - start_x
+                                                        from_to_point_y = from_y - start_y
+                                                        from_along = from_to_point_x * line_unit_x + from_to_point_y * line_unit_y
+                                                        
+                                                        to_to_point_x = to_x - start_x
+                                                        to_to_point_y = to_y - start_y
+                                                        to_along = to_to_point_x * line_unit_x + to_to_point_y * line_unit_y
+                                                        
+                                                        # Add lithology intervals on left side
+                                                        fig_cross_cluster.add_trace(go.Scatter(
+                                                            x=[from_along + litho_offset, to_along + litho_offset],
+                                                            y=[from_z, to_z],
+                                                            mode='lines',
+                                                            line=dict(width=20, color=litho_colors[litho_code]),
+                                                            name=legend_name,
+                                                            legendgroup=f"litho_{legend_name}",
+                                                            showlegend=show_legend,
+                                                            hovertemplate=(
+                                                                f"<b>Hole:</b> {hole_id}<br>" +
+                                                                f"<b>Lithology:</b> {legend_name}<br>" +
+                                                                f"<b>From:</b> {interval['FROM']:.1f}m<br>" +
+                                                                f"<b>To:</b> {interval['TO']:.1f}m<br>" +
+                                                                "<extra></extra>"
+                                                            )
+                                                        ))
+                                        
+                                        # Add grades if selected
+                                        if show_grades and primary_element_cluster_cross:
+                                            hover_text_grade = []
+                                            for _, row in section_df.iterrows():
+                                                info = [
+                                                    f"<b>Hole ID:</b> {row['HOLE_ID']}",
+                                                    f"<b>{primary_element_cluster_cross}:</b> {row[primary_element_cluster_cross]:.2f}",
+                                                    f"<b>Cluster:</b> {row['Cluster']}",
+                                                    f"<b>From:</b> {row['FROM']:.2f}m",
+                                                    f"<b>To:</b> {row['TO']:.2f}m",
+                                                    f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
+                                                ]
+                                                hover_text_grade.append("<br>".join(info))
+                                            
+                                            # Color scale for grades
+                                            color_values = section_df[primary_element_cluster_cross]
+                                            min_val = section_df[primary_element_cluster_cross].min()
+                                            max_val = section_df[primary_element_cluster_cross].max()
+                                            
+                                            if use_log_scale_cluster_cross and min_val > 0:
+                                                log_min = np.floor(np.log10(min_val))
+                                                log_max = np.ceil(np.log10(max_val))
+                                                tick_vals = []
+                                                tick_text = []
+                                                for i in range(int(log_min), int(log_max) + 1):
+                                                    current = 10**i
+                                                    if min_val <= current <= max_val:
+                                                        tick_vals.append(current)
+                                                        tick_text.append(f'{current:.3g}')
+                                                if min_val not in tick_vals:
+                                                    tick_vals.insert(0, min_val)
+                                                    tick_text.insert(0, f'{min_val:.2f}')
+                                                if max_val not in tick_vals:
+                                                    tick_vals.append(max_val)
+                                                    tick_text.append(f'{max_val:.2f}')
+                                            else:
+                                                tick_vals = np.linspace(min_val, max_val, 6)
+                                                tick_text = [f'{v:.3f}' for v in tick_vals]
+                                            
+                                            # Add grade points on right side
+                                            fig_cross_cluster.add_trace(go.Scatter(
+                                                x=section_df['section_distance'] + grade_offset,
+                                                y=section_df['z'],
+                                                mode='markers',
+                                                marker=dict(
+                                                    size=12,
+                                                    color=color_values,
+                                                    colorscale='rdylbu',
+                                                    reversescale=True,
+                                                    showscale=True,
+                                                    colorbar=dict(
+                                                        title=f"{primary_element_cluster_cross} Grade",
+                                                        len=0.75,
+                                                        tickmode='array',
+                                                        tickvals=tick_vals,
+                                                        ticktext=tick_text,
+                                                        x=1.02
+                                                    ),
+                                                    cmin=min_val,
+                                                    cmax=max_val,
+                                                    symbol='square'
+                                                ),
+                                                text=hover_text_grade,
+                                                hovertemplate="%{text}<extra></extra>",
+                                                name=f'{primary_element_cluster_cross} Grade'
+                                            ))
+                                        
+                                        
+                                        # Add drill hole traces
+                                        collar_section_data = []
+                                        for idx, row in st.session_state.collar_df.iterrows():
+                                            to_point_x = row['EASTING'] - start_x
+                                            to_point_y = row['NORTHING'] - start_y
+                                            along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+                                            perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+                                            
+                                            if (abs(perp_dist) <= section_width_cluster/2 and 
+                                                0 <= along_line <= line_length):
+                                                collar_section_data.append({
+                                                    'HOLE_ID': row['HOLE_ID'],
+                                                    'section_distance': along_line,
+                                                    'elevation': row['ELEVATION'],
+                                                    'perp_distance': perp_dist
+                                                })
+                                        
+                                        collar_section_dict = {c['HOLE_ID']: c for c in collar_section_data}
+                                        
+                                        # Add drill traces
+                                        for hole_id in section_df['HOLE_ID'].unique():
+                                            hole_data = section_df[section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+                                            
+                                            if hole_id in collar_section_dict:
+                                                collar_point = collar_section_dict[hole_id]
+                                                trace_points = [(collar_point['section_distance'], collar_point['elevation'])]
+                                                for _, row in hole_data.iterrows():
+                                                    trace_points.append((row['section_distance'], row['z']))
+                                                
+                                                trace_x, trace_y = zip(*trace_points)
+                                                fig_cross_cluster.add_trace(go.Scatter(
+                                                    x=trace_x,
+                                                    y=trace_y,
+                                                    mode='lines',
+                                                    line=dict(color='gray', width=2),
+                                                    showlegend=False,
+                                                    hoverinfo='skip',
+                                                    name=f'Trace {hole_id}'
+                                                ))
+                                        # Add cluster points ON the drill trace (center)
+                                        for cluster in sorted(section_df['Cluster'].unique()):
+                                            if cluster >= 0:
+                                                cluster_data = section_df[section_df['Cluster'] == cluster]
+                                                
+                                                hover_text = []
+                                                for _, row in cluster_data.iterrows():
+                                                    info = [
+                                                        f"<b>Hole ID:</b> {row['HOLE_ID']}",
+                                                        f"<b>Cluster:</b> {cluster}",
+                                                        f"<b>From:</b> {row['FROM']:.2f}m",
+                                                        f"<b>To:</b> {row['TO']:.2f}m",
+                                                        f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
+                                                    ]
+                                                    # Safe handling of LITHO column
+                                                    if 'LITHO' in row and pd.notna(row['LITHO']):
+                                                        info.append(f"<b>Lithology:</b> {row['LITHO']}")
+                                                    if primary_element_cluster_cross and primary_element_cluster_cross in row:
+                                                        info.append(f"<b>{primary_element_cluster_cross}:</b> {row[primary_element_cluster_cross]:.2f}")
+                                                    hover_text.append("<br>".join(info))
+                                                
+                                                fig_cross_cluster.add_trace(go.Scatter(
+                                                    x=cluster_data['section_distance'] + cluster_offset,
+                                                    y=cluster_data['z'],
+                                                    mode='markers',
+                                                    marker=dict(
+                                                        size=15,
+                                                        color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)],
+                                                        symbol='circle',
+                                                        line=dict(width=2, color='black')  # Add black outline for visibility
+                                                    ),
+                                                    text=hover_text,
+                                                    hovertemplate="%{text}<extra></extra>",
+                                                    name=f'Cluster {cluster}'
+                                                ))                                        
+                                        # Add collar points
+                                        if collar_section_data:
+                                            collar_section_df = pd.DataFrame(collar_section_data)
+                                            fig_cross_cluster.add_trace(go.Scatter(
+                                                x=collar_section_df['section_distance'],
+                                                y=collar_section_df['elevation'],
+                                                mode='markers+text',
+                                                marker=dict(size=10, color='red', symbol='triangle-up'),
+                                                text=collar_section_df['HOLE_ID'],
+                                                textposition='top center',
+                                                textfont=dict(size=10, color='red'),
+                                                name='Collars',
+                                                hovertemplate="<b>Hole:</b> %{customdata}<br><b>Collar</b><extra></extra>",
+                                                customdata=collar_section_df['HOLE_ID']
+                                            ))
+                                        
+                                        # Calculate section azimuth for title
+                                        section_azimuth = np.degrees(np.arctan2(line_dx, line_dy))
+                                        if section_azimuth < 0:
+                                            section_azimuth += 360
+                                        
+                                        # Layout
+                                        fig_cross_cluster.update_layout(
+                                            title=f"Cluster Cross Section - Azimuth: {section_azimuth:.1f}° - Length: {line_length:.1f}m - Width: {section_width_cluster:.1f}m",
+                                            xaxis_title="Distance along section (m)",
+                                            yaxis_title="Elevation (m)",
+                                            height=900,
+                                            width=1600,
+                                            legend=dict(
+                                                yanchor="top",
+                                                y=0.99,
+                                                xanchor="left",
+                                                x=1.15,
+                                                bgcolor="rgba(255, 255, 255, 0.8)",
+                                                bordercolor="rgba(0, 0, 0, 0.3)",
+                                                borderwidth=1
+                                            ),
+                                            margin=dict(r=300, l=50, t=80, b=50)
+                                        )
+                                        
+                                        st.subheader("Cluster Cross Section")
+                                        st.plotly_chart(fig_cross_cluster, use_container_width=True)
+                                        
+                                        # Add explanatory text
+                                        explanation = "📍 **Reading the Cluster Cross Section:**\n"
+                                        explanation += "- **Gray lines** = Drill hole traces\n"
+                                        explanation += "- **Colored circles (center)** = Cluster assignments on drill traces\n"
+                                        if show_lithology:
+                                            explanation += "- **Left side (colored bars)** = Lithology intervals\n"
+                                        if show_grades:
+                                            explanation += "- **Right side (colored squares)** = Grade values\n"
+                                        explanation += "- **Red triangles** = Collar locations with hole IDs"
+                                        
+                                        st.info(explanation)
+                                    else:
+                                        st.warning("No cluster data found in the specified cross section area. Try adjusting the section width or selecting different holes.")
+                    else:
+                        st.warning("⚠️ Please select at least 2 holes to create a cluster cross section.")
                 else:
                     st.warning("No cluster data available for visualisation after applying filters.")
         else:
@@ -3428,7 +4365,7 @@ Just write clean Python code that can be directly executed.
             - **Create a box plot of gold values by lithology**
             - **Make a bar chart showing average gold by HOLE_ID**
             - **Plot a correlation heatmap of all elemental values**
-            - **Create a 3D scatter plot of x, y, and z coordinates colored by gold values**
+            - **Create a 3D scatter plot of x, y, and z coordinates coloured by gold values**
             
             For more complex analysis:
             
