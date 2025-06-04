@@ -19,7 +19,10 @@ from io import BytesIO
 import base64
 
 
-
+def create_html_download(fig, filename_prefix):
+    """Create HTML download for plotly figures"""
+    html_string = fig.to_html(include_plotlyjs='cdn')
+    return html_string, f"{filename_prefix}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.html"
 
 
 
@@ -2601,6 +2604,17 @@ with tab_viz:
 
             update_figure_layout(fig, vertical_exaggeration)
             st.plotly_chart(fig)
+            # Store figure and add download button
+            st.session_state.main_3d_figure = fig
+            html_string, filename = create_html_download(fig, "3D_visualisation")
+            st.download_button(
+                label="📊 Download 3D Visualisation (HTML)",
+                data=html_string,
+                file_name=filename,
+                mime="text/html",
+                help="Download interactive 3D plot as HTML file",
+                key="download_3d_viz"
+            )
         else:
             st.warning("Please select at least one visualisation type.")
 
@@ -3455,6 +3469,18 @@ with tab_clustering:
                             add_collar_points(fig, viz_collar_df, x_offset=offsets["Lithology"])
                     update_figure_layout(fig, vertical_exaggeration)
                     st.plotly_chart(fig, key="previous_cluster_viz_plot")
+
+                    # Store figure and add download button
+                    st.session_state.cluster_3d_figure = fig
+                    html_string, filename = create_html_download(fig, "cluster_visualisation")
+                    st.download_button(
+                        label="🔬 Download Cluster Plot (HTML)",
+                        data=html_string,
+                        file_name=filename,
+                        mime="text/html",
+                        help="Download interactive cluster plot as HTML file",
+                        key="download_cluster_viz"
+                    )
                     
 
                     st.markdown("---")  
