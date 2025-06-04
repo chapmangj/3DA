@@ -3,19 +3,26 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import matplotlib.pyplot as plt
 from plotly.subplots import make_subplots
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from streamlit import session_state as state
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
-from sklearn.ensemble import RandomForestRegressor
 from PIL import Image
 from google import genai
 import io
 import sys
+import os
+import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
 
+
+def create_html_download(fig, filename_prefix):
+    """Create HTML download for plotly figures"""
+    html_string = fig.to_html(include_plotlyjs='cdn')
+    return html_string, f"{filename_prefix}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.html"
 
 
 
@@ -57,12 +64,14 @@ if 'significant_intervals' not in st.session_state:
 if 'google_api_key' not in st.session_state:
     st.session_state.google_api_key = None
 
+
+
 # =============================================================================
 # PAGE CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="3DA",
-    page_icon="🔍",
+    page_title="GeoInsights 3D",
+    page_icon="🪨",
     layout="wide"
 )
 st.markdown('<div style="position: fixed; bottom: 10px; right: 10px; font-size: 12px; color: gray;">Version 1.1</div>', unsafe_allow_html=True)
@@ -70,15 +79,24 @@ st.markdown('<div style="position: fixed; bottom: 10px; right: 10px; font-size: 
 # =============================================================================
 # HEADER AND LOGO
 # =============================================================================
-col1, col2, col3 = st.columns([2, 1, 2])
-with col2:
-    try:
-        logo = Image.open("3DA logo.png")
-        st.image(logo, use_container_width=True)
-    except:
-        st.write("3DA")
-st.markdown("<h1 style='text-align: center;'>Exploratory Data Analysis and Visualisation</h1>", unsafe_allow_html=True)
+try:
+    logo = Image.open("3DA logo.png")
+    # Convert to base64 for CSS embedding
+    import base64
+    from io import BytesIO
+    
+    buffered = BytesIO()
+    logo.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    
+    st.markdown(
+        f'<div style="display: flex; justify-content: center; margin-bottom: 20px;"><img src="data:image/png;base64,{img_str}" width="600"></div>',
+        unsafe_allow_html=True
+    )
+except:
+    st.markdown('<div style="text-align: center; margin-bottom: 20px;">3DA</div>', unsafe_allow_html=True)
 
+st.markdown("<h1 style='text-align: center;'>Exploratory Data Analysis and Visualisation</h1>", unsafe_allow_html=True)
 # Add LLM API key input to sidebar
 with st.sidebar:
     st.markdown("<h3>LLM Integration</h3>", unsafe_allow_html=True)
@@ -106,6 +124,8 @@ with st.sidebar:
 # =============================================================================
 # DATA READING & PROCESSING FUNCTIONS
 # =============================================================================
+
+
 def read_csv(file, format_type):
     """Read CSV files with standard or mining format"""
     try:
@@ -132,8 +152,8 @@ def process_collar_data(collar_file, format_type):
 
             st.subheader("Select Collar Columns")
             hole_id_col = next((col for col in collar_df.columns if 'hole' in col.lower()), None)
-            easting_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['east', 'mga_e', 'x'])), None)
-            northing_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['north', 'mga_n', 'y'])), None)
+            easting_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['easting', 'mga_e', 'x','long','longitude'])), None)
+            northing_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['northing', 'mga_n', 'y','lat','latitude'])), None)
             elevation_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['elevation', 'rl', 'z'])), None)
             dip_col = next((col for col in collar_df.columns if 'dip' in col.lower()), None)
             azimuth_col = next((col for col in collar_df.columns if any(x in col.lower() for x in ['azi', 'azimuth'])), None)
@@ -1008,20 +1028,20 @@ def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mod
     ))
 
 def add_lithology_visualisation(fig, viz_litho_df, viz_mode, selected_lithos=None, litho_dict=None, x_offset=0):
-    """Add lithology visualisation to the figure"""
+    """Add lithology visualisation to the figure as intervals"""
     if viz_litho_df is None or viz_litho_df.empty:
         st.warning("No lithology data available for display.")
         return
+    
     unique_lithos = viz_litho_df['LITHO'].unique()
     color_palette = px.colors.qualitative.Alphabet
     litho_colors = [color_palette[i % len(color_palette)] for i in range(len(unique_lithos))]
     litho_color_map = dict(zip(unique_lithos, litho_colors))
     legend_added = set()
-    square_size = 8
+    
     for hole_id in viz_litho_df['HOLE_ID'].unique():
         hole_data = viz_litho_df[viz_litho_df['HOLE_ID'] == hole_id].sort_values('FROM')
-        collar = hole_data.iloc[0]
-        collar_x, collar_y, collar_z = collar['EASTING'], collar['NORTHING'], collar['ELEVATION']
+        
         for _, interval in hole_data.iterrows():
             litho_code = interval['LITHO']
             litho_desc = litho_dict.get(litho_code, "") if litho_dict else ""
@@ -1029,37 +1049,52 @@ def add_lithology_visualisation(fig, viz_litho_df, viz_mode, selected_lithos=Non
             show_legend = legend_name not in legend_added
             if show_legend:
                 legend_added.add(legend_name)
-            depths = np.linspace(interval['FROM'], interval['TO'], 
-                                 num=max(2, int((interval['TO'] - interval['FROM']) / 2)))
+            
+            # Calculate 3D coordinates for FROM and TO depths
             azimuth_rad = np.radians(90 - interval['AZIMUTH'])
             dip_rad = np.radians(-interval['DIP'])
-            x_values = collar_x + depths * np.cos(dip_rad) * np.cos(azimuth_rad) + x_offset
-            y_values = collar_y + depths * np.cos(dip_rad) * np.sin(azimuth_rad)
-            z_values = collar_z - depths * np.sin(dip_rad)
+            
+            # FROM point
+            from_depth = interval['FROM']
+            from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+            from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+            from_dz = from_depth * np.sin(dip_rad)
+            from_x = interval['EASTING'] + from_dx + x_offset
+            from_y = interval['NORTHING'] + from_dy
+            from_z = interval['ELEVATION'] - from_dz
+            
+            # TO point
+            to_depth = interval['TO']
+            to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+            to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+            to_dz = to_depth * np.sin(dip_rad)
+            to_x = interval['EASTING'] + to_dx + x_offset
+            to_y = interval['NORTHING'] + to_dy
+            to_z = interval['ELEVATION'] - to_dz
+            
+            # Add thick line segment for the lithology interval
             fig.add_trace(go.Scatter3d(
-                x=x_values,
-                y=y_values,
-                z=z_values,
-                mode='markers',
-                marker=dict(
-                    symbol='square',
-                    size=square_size,
-                    color=litho_color_map[litho_code],
+                x=[from_x, to_x],
+                y=[from_y, to_y],
+                z=[from_z, to_z],
+                mode='lines',
+                line=dict(
+                    width=20,  # Thick lines for visibility
+                    color=litho_color_map[litho_code]
                 ),
                 name=legend_name,
                 legendgroup=legend_name,
                 hovertemplate=(
                     f"<b>Hole ID:</b> {hole_id}<br>" +
                     f"<b>Lithology:</b> {legend_name}<br>" +
-                    "<b>From:</b> {:.2f}<br>".format(interval['FROM']) +
-                    "<b>To:</b> {:.2f}<br>".format(interval['TO']) +
-                    "<b>X</b>: %{x:.2f}<br>" +
-                    "<b>Y</b>: %{y:.2f}<br>" +
-                    "<b>Z</b>: %{z:.2f}<br>"
+                    f"<b>From:</b> {interval['FROM']:.2f}m<br>" +
+                    f"<b>To:</b> {interval['TO']:.2f}m<br>" +
+                    f"<b>Length:</b> {interval['TO'] - interval['FROM']:.2f}m<br>" +
+                    "<extra></extra>"
                 ),
                 showlegend=show_legend
             ))
-
+            
 def add_collar_points(fig, collar_df, x_offset=0):
     """Add collar points to the figure"""
     fig.add_trace(go.Scatter3d(
@@ -1146,6 +1181,399 @@ def update_figure_layout(fig, vertical_exaggeration=1.0):
         yaxis_range=[y_min, y_max],
         zaxis_range=[z_min, z_max]
     )
+def create_drill_fence_cross_section(merged_df, viz_litho_df, collar_df, section_line_start, section_line_end, section_width, primary_element=None, use_log_scale=True, litho_dict=None):
+    """
+    Create a drill fence cross-section with lithology and grade on opposite sides of drill traces
+    """
+    
+    # Calculate section line parameters
+    start_x, start_y = section_line_start
+    end_x, end_y = section_line_end
+    
+    # Section line vector and length
+    line_dx = end_x - start_x
+    line_dy = end_y - start_y
+    line_length = np.sqrt(line_dx**2 + line_dy**2)
+    
+    if line_length == 0:
+        st.error("Section line start and end points cannot be the same")
+        return None
+    
+    # Unit vector along section line
+    line_unit_x = line_dx / line_length
+    line_unit_y = line_dy / line_length
+    
+    # Perpendicular unit vector (for distance calculation)
+    perp_unit_x = -line_unit_y
+    perp_unit_y = line_unit_x
+    
+    def point_to_line_distance_and_position(px, py):
+        """Calculate perpendicular distance from point to section line and position along line"""
+        # Vector from line start to point
+        to_point_x = px - start_x
+        to_point_y = py - start_y
+        
+        # Distance along section line (projection)
+        along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+        
+        # Perpendicular distance from line
+        perp_distance = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+        
+        return along_line, perp_distance
+    
+    # Filter data points within section width
+    section_data = []
+    for idx, row in merged_df.iterrows():
+        along_line, perp_dist = point_to_line_distance_and_position(row['x'], row['y'])
+        
+        # Check if point is within section width and along the section line
+        if (abs(perp_dist) <= section_width/2 and 
+            0 <= along_line <= line_length):
+            
+            row_dict = row.to_dict()
+            row_dict['section_distance'] = along_line  # Distance along section line
+            row_dict['perp_distance'] = perp_dist     # Distance from section line
+            section_data.append(row_dict)
+    
+    if not section_data:
+        return None
+    
+    section_df = pd.DataFrame(section_data)
+    
+    # Create the cross-section plot
+    fig = go.Figure()
+    
+    # Offset for displaying grade and lithology on opposite sides
+    grade_offset = 5  # Offset grade points to the right
+    litho_offset = -5  # Offset lithology to the left
+    
+    # Process collar points first (needed for drill traces)
+    collar_section_data = []
+    for idx, row in collar_df.iterrows():
+        along_line, perp_dist = point_to_line_distance_and_position(row['EASTING'], row['NORTHING'])
+        
+        if (abs(perp_dist) <= section_width/2 and 
+            0 <= along_line <= line_length):
+            collar_section_data.append({
+                'HOLE_ID': row['HOLE_ID'],
+                'section_distance': along_line,
+                'elevation': row['ELEVATION'],
+                'perp_distance': perp_dist
+            })
+    
+    # Create collar lookup dictionary
+    collar_section_dict = {}
+    if collar_section_data:
+        collar_section_dict = {c['HOLE_ID']: c for c in collar_section_data}
+    
+    # Add grade visualization if available
+    if primary_element and primary_element in section_df.columns:
+        hover_text = []
+        for _, row in section_df.iterrows():
+            info = [
+                f"<b>Hole ID:</b> {row['HOLE_ID']}",
+                f"<b>{primary_element}:</b> {row[primary_element]:.2f}",
+                f"<b>From:</b> {row['FROM']:.2f}m",
+                f"<b>To:</b> {row['TO']:.2f}m",
+                f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
+            ]
+            if 'LITHO' in row:
+                info.append(f"<b>Lithology:</b> {row['LITHO']}")
+            hover_text.append("<br>".join(info))
+        
+        # Color scale setup
+        color_values = section_df[primary_element]
+        min_val = section_df[primary_element].min()
+        max_val = section_df[primary_element].max()
+        
+        # Create tick values for colorbar
+        if use_log_scale and min_val > 0:
+            log_min = np.floor(np.log10(min_val))
+            log_max = np.ceil(np.log10(max_val))
+            tick_vals = []
+            tick_text = []
+            for i in range(int(log_min), int(log_max) + 1):
+                current = 10**i
+                if min_val <= current <= max_val:
+                    tick_vals.append(current)
+                    tick_text.append(f'{current:.3g}')
+            if min_val not in tick_vals:
+                tick_vals.insert(0, min_val)
+                tick_text.insert(0, f'{min_val:.2f}')
+            if max_val not in tick_vals:
+                tick_vals.append(max_val)
+                tick_text.append(f'{max_val:.2f}')
+        else:
+            tick_vals = np.linspace(min_val, max_val, 6)
+            tick_text = [f'{v:.3f}' for v in tick_vals]
+        
+        # Add grade points with offset to the right
+        fig.add_trace(go.Scatter(
+            x=section_df['section_distance'] + grade_offset,
+            y=section_df['z'],
+            mode='markers',
+            marker=dict(
+                size=15,
+                color=color_values,
+                colorscale='rdylbu',
+                reversescale=True,
+                showscale=True,
+                colorbar=dict(
+                    title=f"{primary_element} Grade",
+                    len=0.75,
+                    tickmode='array',
+                    tickvals=tick_vals,
+                    ticktext=tick_text,
+                    x=1.02
+                ),
+                cmin=min_val,
+                cmax=max_val,
+                symbol='square',  # Square markers
+            ),
+            text=hover_text,
+            hovertemplate="%{text}<extra></extra>",
+            name=f'{primary_element} Grade'
+        ))
+    
+    # Add lithology intervals if available
+    if viz_litho_df is not None:
+        litho_section_data = []
+        for idx, row in viz_litho_df.iterrows():
+            along_line, perp_dist = point_to_line_distance_and_position(row['x'], row['y'])
+            
+            if (abs(perp_dist) <= section_width/2 and 
+                0 <= along_line <= line_length):
+                
+                row_dict = row.to_dict()
+                row_dict['section_distance'] = along_line
+                row_dict['perp_distance'] = perp_dist
+                litho_section_data.append(row_dict)
+        
+        if litho_section_data:
+            litho_section_df = pd.DataFrame(litho_section_data)
+            
+            # Group by hole and create lithology intervals
+            unique_lithos = litho_section_df['LITHO'].unique()
+            color_palette = px.colors.qualitative.Set1
+            litho_colors = {litho: color_palette[i % len(color_palette)] for i, litho in enumerate(unique_lithos)}
+            
+            legend_added = set()
+            
+            for hole_id in litho_section_df['HOLE_ID'].unique():
+                hole_litho_data = litho_section_df[litho_section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+                
+                for _, interval in hole_litho_data.iterrows():
+                    litho_code = interval['LITHO']
+                    litho_desc = litho_dict.get(litho_code, "") if litho_dict else ""
+                    legend_name = f"{litho_code} {litho_desc}".strip() if litho_dict else litho_code
+                    
+                    show_legend = legend_name not in legend_added
+                    if show_legend:
+                        legend_added.add(legend_name)
+                    
+                    # Calculate interval positions in 3D space
+                    azimuth_rad = np.radians(90 - interval['AZIMUTH'])
+                    dip_rad = np.radians(-interval['DIP'])
+                    
+                    # FROM point
+                    from_depth = interval['FROM']
+                    from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                    from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                    from_dz = from_depth * np.sin(dip_rad)
+                    from_x = interval['EASTING'] + from_dx
+                    from_y = interval['NORTHING'] + from_dy
+                    from_z = interval['ELEVATION'] - from_dz
+                    
+                    # TO point
+                    to_depth = interval['TO']
+                    to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                    to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                    to_dz = to_depth * np.sin(dip_rad)
+                    to_x = interval['EASTING'] + to_dx
+                    to_y = interval['NORTHING'] + to_dy
+                    to_z = interval['ELEVATION'] - to_dz
+                    
+                    # Project onto section line
+                    from_along, _ = point_to_line_distance_and_position(from_x, from_y)
+                    to_along, _ = point_to_line_distance_and_position(to_x, to_y)
+                    
+                    # Add lithology intervals with offset to the left
+                    fig.add_trace(go.Scatter(
+                        x=[from_along + litho_offset, to_along + litho_offset],
+                        y=[from_z, to_z],
+                        mode='lines',
+                        line=dict(width=20, color=litho_colors[litho_code]),
+                        name=legend_name,
+                        legendgroup=f"litho_{legend_name}",
+                        showlegend=show_legend,
+                        hovertemplate=(
+                            f"<b>Hole:</b> {hole_id}<br>" +
+                            f"<b>Lithology:</b> {legend_name}<br>" +
+                            f"<b>From:</b> {interval['FROM']:.1f}m<br>" +
+                            f"<b>To:</b> {interval['TO']:.1f}m<br>" +
+                            "<extra></extra>"
+                        )
+                    ))
+    
+    # Add drill hole traces (center line) - START FROM COLLARS
+    for hole_id in section_df['HOLE_ID'].unique():
+        hole_data = section_df[section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+        
+        if hole_id in collar_section_dict:
+            collar_point = collar_section_dict[hole_id]
+            
+            # Start trace from collar
+            trace_points = [(collar_point['section_distance'], collar_point['elevation'])]
+            
+            # Add all sample points in order
+            for _, row in hole_data.iterrows():
+                trace_points.append((row['section_distance'], row['z']))
+            
+            # Extract x and y coordinates
+            trace_x, trace_y = zip(*trace_points)
+            
+            fig.add_trace(go.Scatter(
+                x=trace_x,
+                y=trace_y,
+                mode='lines',
+                line=dict(color='black', width=2),
+                showlegend=False,
+                hoverinfo='skip',
+                name=f'Trace {hole_id}'
+            ))
+        else:
+            # If no collar found, just connect the sample points
+            if len(hole_data) > 1:
+                fig.add_trace(go.Scatter(
+                    x=hole_data['section_distance'],
+                    y=hole_data['z'],
+                    mode='lines',
+                    line=dict(color='black', width=2),
+                    showlegend=False,
+                    hoverinfo='skip',
+                    name=f'Trace {hole_id}'
+                ))
+    
+    # Add collar points
+    if collar_section_data:
+        collar_section_df = pd.DataFrame(collar_section_data)
+        fig.add_trace(go.Scatter(
+            x=collar_section_df['section_distance'],
+            y=collar_section_df['elevation'],
+            mode='markers+text',
+            marker=dict(size=10, color='red', symbol='triangle-up'),
+            text=collar_section_df['HOLE_ID'],
+            textposition='top center',
+            textfont=dict(size=10, color='red'),
+            name='Collars',
+            hovertemplate="<b>Hole:</b> %{customdata}<br><b>Collar</b><extra></extra>",
+            customdata=collar_section_df['HOLE_ID']
+        ))
+    
+    # Calculate section azimuth for title
+    section_azimuth = np.degrees(np.arctan2(line_dx, line_dy))
+    if section_azimuth < 0:
+        section_azimuth += 360
+    
+    # Layout with annotations - MOVED LEGEND FURTHER RIGHT
+    fig.update_layout(
+        title=f"Drill Fence Cross Section - Azimuth: {section_azimuth:.1f}° - Length: {line_length:.1f}m - Width: {section_width:.1f}m",
+        xaxis_title="Distance along section (m)",
+        yaxis_title="Elevation (m)",
+        height=900,
+        width=1600,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=1.15,  # Moved further right from 1.05 to 1.15
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="rgba(0, 0, 0, 0.3)",
+            borderwidth=1
+        ),
+        margin=dict(r=300, l=50, t=80, b=50)  # Increased right margin to 300
+    )
+    
+
+    
+    return fig
+def create_section_line_map(merged_df, collar_df, section_line_start, section_line_end, section_width):
+    """Create a map showing the section line and data points"""
+    fig = go.Figure()
+    
+    # Add all drill hole locations
+    fig.add_trace(go.Scatter(
+        x=merged_df['x'],
+        y=merged_df['y'],
+        mode='markers',
+        marker=dict(size=4, color='lightblue', opacity=0.6),
+        name='All Samples',
+        hovertemplate="<b>Hole:</b> %{customdata}<extra></extra>",
+        customdata=merged_df['HOLE_ID']
+    ))
+    
+    # Add collar points
+    fig.add_trace(go.Scatter(
+        x=collar_df['EASTING'],
+        y=collar_df['NORTHING'],
+        mode='markers+text',  
+        marker=dict(size=8, color='red', symbol='circle'),  
+        text=collar_df['HOLE_ID'],  # Display hole IDs as text
+        textposition='top center',  
+        textfont=dict(size=10, color='red'),  
+        name='Collars',
+        hovertemplate="<b>Hole:</b> %{customdata}<extra></extra>",
+        customdata=collar_df['HOLE_ID']
+    ))
+    
+    # Add section line
+    fig.add_trace(go.Scatter(
+        x=[section_line_start[0], section_line_end[0]],
+        y=[section_line_start[1], section_line_end[1]],
+        mode='lines',
+        line=dict(color='red', width=4),
+        name='Section Line'
+    ))
+    
+    # Add section width boundaries
+    start_x, start_y = section_line_start
+    end_x, end_y = section_line_end
+    line_dx = end_x - start_x
+    line_dy = end_y - start_y
+    line_length = np.sqrt(line_dx**2 + line_dy**2)
+    
+    if line_length > 0:
+        # Perpendicular unit vector
+        perp_unit_x = -line_dy / line_length
+        perp_unit_y = line_dx / line_length
+        
+        # Section boundary lines
+        boundary1_start = [start_x + perp_unit_x * section_width/2, start_y + perp_unit_y * section_width/2]
+        boundary1_end = [end_x + perp_unit_x * section_width/2, end_y + perp_unit_y * section_width/2]
+        boundary2_start = [start_x - perp_unit_x * section_width/2, start_y - perp_unit_y * section_width/2]
+        boundary2_end = [end_x - perp_unit_x * section_width/2, end_y - perp_unit_y * section_width/2]
+        
+        # Add boundary lines
+        for i, (b_start, b_end) in enumerate([(boundary1_start, boundary1_end), (boundary2_start, boundary2_end)]):
+            fig.add_trace(go.Scatter(
+                x=[b_start[0], b_end[0]],
+                y=[b_start[1], b_end[1]],
+                mode='lines',
+                line=dict(color='orange', width=2, dash='dash'),
+                name='Section Width' if i == 0 else None,
+                showlegend=i == 0
+            ))
+    
+    fig.update_layout(
+        title="Section Line Location",
+        xaxis_title="Easting",
+        yaxis_title="Northing",
+        height=600,
+        width=800,
+        xaxis=dict(scaleanchor="y", scaleratio=1)
+    )
+    
+    return fig
 
 def show_statistical_analysis(merged_df, primary_element, use_log_scale):
     """Show basic stats and histogram"""
@@ -1714,122 +2142,80 @@ def generate_summary_prompt(user_context=""):
 # MAIN APP: TABS
 
 tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
-    "Data Loading", "Visualisations", "Statistics", "Clustering", "ML Explain", "AI GEO Summary", "Data Analysis Playground", "Export Data"
+    "📁 Data Loading", "📏 3D Visualisations", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground", "💾 Export Data"
 ])
 
 
-
 # =============================================================================
-# ML Explain Tab 
+# DATA LOADING TAB
 # =============================================================================
-with tab_ml_explain: 
-    st.header("ML Explain")
-    st.write("This tab allows you to run SHAP analysis for model explanations, using an element as the target.")
-
-    if st.session_state.merged_df is None:
-        st.warning("Please load data first in the Data Loading tab.")
-    else:
-        st.subheader("SHAP Analysis Options")
-
-        target_element = None
-        if hasattr(st.session_state, 'analysis_mode') and \
-           st.session_state.analysis_mode in ["collar_assay", "all"] and \
-           hasattr(st.session_state, 'element_cols') and st.session_state.element_cols:
-            target_element = st.selectbox("Select target element for SHAP analysis", st.session_state.element_cols)
-        else:
-            st.error("Elemental data is not available or analysis mode is not set appropriately for SHAP analysis.")
-
-        subset_option = st.radio("Select data subset for SHAP analysis", ("All Data", "Specific Cluster", "Specific Lithology"))
-        shap_df = st.session_state.merged_df.copy()
-
-        if subset_option == "Specific Cluster":
-            if "Cluster" in shap_df.columns:
-                clusters = sorted(shap_df["Cluster"].astype(str).unique())
-                selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
-                shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
-            else:
-                st.warning("No clustering data available. Running SHAP on all data.")
-        elif subset_option == "Specific Lithology":
-            if "LITHO" in shap_df.columns:
-                lithos = sorted(shap_df["LITHO"].astype(str).unique())
-                selected_lithos = st.multiselect("Select lithologies", lithos, default=lithos)
-                shap_df = shap_df[shap_df["LITHO"].astype(str).isin(selected_lithos)]
-            else:
-                st.warning("No lithology data available. Running SHAP on all data.")
-
-        if target_element:
-            if st.button("Run SHAP Analysis"):
-                exclude_cols = ['HOLE_ID', 'FROM', 'TO', 'EASTING', 'NORTHING', 'ELEVATION', 'DIP', 'AZIMUTH',
-                                'MIDPOINT', 'dx', 'dy', 'dz', 'x', 'y', 'z', 'LITHO', 'Cluster']
-                
-                model_cols = [col for col in shap_df.columns
-                              if col not in exclude_cols
-                              and pd.api.types.is_numeric_dtype(shap_df[col])
-                              and col != target_element]
-                
-                if not model_cols:
-                    st.error("No suitable features available for SHAP analysis after filtering.")
-                elif target_element not in shap_df.columns:
-                     st.error(f"Target element '{target_element}' not found in the dataframe.")
-                elif shap_df[model_cols].empty or shap_df[target_element].empty:
-                    st.error("Feature set or target data is empty after subsetting. Cannot train model.")
-                else:
-                    st.subheader("Training Model for SHAP Analysis")
-                    st.write(f"Target: {target_element}")
-                    st.write(f"Number of features: {len(model_cols)}")
-                    st.write(f"Number of samples: {len(shap_df)}")
-
-                    from sklearn.ensemble import RandomForestRegressor
-                    
-                    X = shap_df[model_cols].fillna(0)
-                    y = shap_df[target_element].fillna(0)
-
-                    if X.empty:
-                        st.error("Feature data (X) is empty. Cannot train model.")
-                    else:
-                        model = RandomForestRegressor(n_estimators=100, random_state=42)
-                        model.fit(X, y)
-                        st.success("Model trained successfully.")
-
-                        st.subheader("Computing SHAP Values")
-                        import shap # Keep import here
-                        explainer = shap.TreeExplainer(model)
-                        shap_values = explainer.shap_values(X)
-
-                        # --- Corrected SHAP Plotting ---
-                        st.subheader("SHAP Summary Plot (Bar)")
-                        # Create a figure and axes. SHAP will use the current active axes.
-                        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
-                        shap.summary_plot(shap_values, X, plot_type="bar", show=False) # Removed ax=ax_bar
-                        st.pyplot(fig_bar)
-
-                        st.subheader("SHAP Beeswarm Plot")
-                        # Create a new figure and axes for the next plot.
-                        fig_beeswarm, ax_beeswarm = plt.subplots(figsize=(10, 6))
-                        shap.summary_plot(shap_values, X, show=False) # Removed ax=ax_beeswarm. Default plot_type is 'dot' (beeswarm).
-                        st.pyplot(fig_beeswarm)
-                        # --- End Corrected SHAP Plotting ---
-
-        elif not target_element and st.session_state.merged_df is not None:
-             st.info("Please select a target element to proceed with SHAP analysis.")
-                                    
 with tab_data:
-    st.header("Data Loading")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📁 Data Loading</h2>", unsafe_allow_html=True)
+    st.markdown("Upload your data files to begin analysis or load demo data to quickly explore the app's features.")
+
+
+    
+    # --- Demo Data Button Section ---
+    if "demo_files_loaded" not in st.session_state:
+        st.session_state.demo_files_loaded = False
+
+    if not st.session_state.demo_files_loaded:
+        if st.button("Load Demo Data"):
+            demo_data_folder = "demo_data"
+            default_format = "Geological Survey Format (Headers in H1000)"
+            
+            collar_file_path = os.path.join(demo_data_folder, "Drill_hole_location.csv")
+            assay_file_path = os.path.join(demo_data_folder, "Drill_hole_geochemistry.csv")
+            litho_file_path = os.path.join(demo_data_folder, "Drill_hole_lithology.csv")
+            litho_dict_file_path = os.path.join(demo_data_folder, "Drill_hole_lithology_dictionary.csv")
+            
+            with open(collar_file_path, "rb") as f:
+                demo_collar = io.BytesIO(f.read())
+                demo_collar.name = "Drill_hole_location.csv"
+                st.session_state.demo_collar_file = demo_collar
+            with open(assay_file_path, "rb") as f:
+                demo_assay = io.BytesIO(f.read())
+                demo_assay.name = "Drill_hole_geochemistry.csv"
+                st.session_state.demo_assay_file = demo_assay
+            with open(litho_file_path, "rb") as f:
+                demo_litho = io.BytesIO(f.read())
+                demo_litho.name = "Drill_hole_lithology.csv"
+                st.session_state.demo_litho_file = demo_litho
+            with open(litho_dict_file_path, "rb") as f:
+                demo_litho_dict = io.BytesIO(f.read())
+                demo_litho_dict.name = "Drill_hole_lithology_dictionary.csv"
+                st.session_state.demo_litho_dict_file = demo_litho_dict
+            
+            st.session_state.demo_files_loaded = True
+            st.success("Demo data loaded successfully!")
+            # Rerun the app if possible; otherwise, instruct the user to refresh.
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+            else:
+                st.write("Please refresh the app for demo data to load.")
+
+    # --- File Uploader or Demo Data ---
+    if st.session_state.get("demo_files_loaded", False):
+        collar_file = st.session_state.demo_collar_file
+        assay_file = st.session_state.demo_assay_file
+        litho_file = st.session_state.demo_litho_file
+        litho_dict_file = st.session_state.demo_litho_dict_file
+    else:
+        collar_file = st.file_uploader("Upload Collar File (CSV)", type=["csv"], key="collar_uploader")
+        assay_file = st.file_uploader("Upload Assay File (CSV)", type=["csv"], key="assay_uploader")
+        litho_file = st.file_uploader("Upload Lithology File (CSV)", type=["csv"], key="litho_uploader")
+        litho_dict_file = st.file_uploader("Upload Lithology Dictionary File (CSV)", type=["csv"], key="litho_dict_uploader")
+    
+    # --- CSV format radio button with Geological Survey Format as default ---
     file_format = st.radio(
         "Select CSV File Format",
-        ("Standard CSV (Headers in row 1)", "Geological Survey Format (Headers in H1000)")
+        ("Standard CSV (Headers in row 1)", "Geological Survey Format (Headers in H1000)"),
+        index=1  # Default to Geological Survey Format
     )
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        collar_file = st.file_uploader("Upload Collar File (CSV)", type=['csv'])
-    with col2:
-        assay_file = st.file_uploader("Upload Assay File (CSV)", type=['csv'])
-    with col3:
-        litho_file = st.file_uploader("Upload Lithology File (CSV)", type=['csv'])
-        litho_dict_file = st.file_uploader("Upload Lithology Dictionary File (CSV)", type=['csv'])
-
-    if (collar_file is not None and collar_file != st.session_state.previous_collar_file) or \
-       (assay_file is not None and assay_file != st.session_state.previous_assay_file):
+    
+    # --- Reset session state if new files are uploaded ---
+    if ((collar_file is not None and collar_file != st.session_state.get("previous_collar_file", None)) or 
+        (assay_file is not None and assay_file != st.session_state.get("previous_assay_file", None))):
         st.session_state.X_scaled = None
         st.session_state.scaler = None
         st.session_state.wcss = None
@@ -1838,6 +2224,7 @@ with tab_data:
         st.session_state.previous_collar_file = collar_file
         st.session_state.previous_assay_file = assay_file
 
+    # --- Determine valid data combinations and set analysis mode ---
     valid_data_combinations = False
     if collar_file:
         if assay_file and not litho_file:
@@ -1852,42 +2239,200 @@ with tab_data:
     else:
         st.warning("Collar file is required.")
 
+    # --- Process Data if Combination is Valid ---
     if valid_data_combinations:
+        # Initialise variables that will be passed to process_and_merge_data
+        # and st.session_state variables that might be accessed later.
+        assay_df = None
+        litho_df = None
+        st.session_state.element_cols = [] # Default to empty list
+        composite_enabled = False           # Default for compositing
+        composite_length = 1.0              # Default for compositing
+
+        # Ensure BytesIO objects (like demo files) are reset before processing
+        if collar_file is not None and hasattr(collar_file, 'seek'):
+            collar_file.seek(0)
         st.session_state.collar_df = process_collar_data(collar_file, file_format)
+
         if st.session_state.collar_df is not None:
+            # Process Assay Data if applicable
             if st.session_state.analysis_mode in ["collar_assay", "all"]:
-                assay_df, st.session_state.element_cols = process_assay_data(assay_file, file_format)
-                st.sidebar.markdown("<h1 style='font-size: 28px;'>OPTIONS</h1>", unsafe_allow_html=True)
-                st.sidebar.header("Compositing Options")
-                composite_enabled = st.sidebar.checkbox("Composite geochemical data")
-                composite_length = 1.0
-                if composite_enabled:
-                    composite_length = st.sidebar.slider("Composite Interval (m)", min_value=1, max_value=10, value=2)
-            else:
-                assay_df = None
-            litho_df = None
+                if assay_file is not None and hasattr(assay_file, 'seek'):
+                    assay_file.seek(0)
+                
+                # Call process_assay_data and get its results
+                # temp_vars are used to avoid overwriting session state until success
+                temp_assay_df, temp_element_cols = process_assay_data(assay_file, file_format)
+
+                if temp_assay_df is not None and temp_element_cols is not None:
+                    assay_df = temp_assay_df # Assign to local var for merging
+                    st.session_state.element_cols = temp_element_cols # Update session state
+                    
+                    # Compositing options in sidebar - these are shown if assay data is loaded.
+                    # Adding unique keys to prevent Streamlit's DuplicateWidgetID error.
+                    # Ideally, these sidebar elements are defined once outside this conditional block.
+                    # The st.sidebar.markdown/header for "OPTIONS" should be defined once globally in your sidebar setup.
+                    # For example:
+                    # with st.sidebar:
+                    #     st.markdown("<h1 style='font-size: 28px;'>OPTIONS</h1>", unsafe_allow_html=True)
+                    #     st.header("Compositing Options")
+                    # Then the checkbox/slider can be here:
+                    composite_enabled = st.sidebar.checkbox("Composite geochemical data", key="data_loading_composite_checkbox")
+                    if composite_enabled:
+                        composite_length = st.sidebar.slider(
+                            "Composite Interval (m)", 
+                            min_value=1.0,  # Ensure float for slider step
+                            max_value=10.0, 
+                            value=2.0, 
+                            step=0.1,       # Add step for float slider
+                            key="data_loading_composite_slider"
+                        )
+                else:
+                    # Assay processing failed or returned None, ensure defaults are used
+                    assay_df = None
+                    st.session_state.element_cols = []
+                    # composite_enabled and composite_length will use their pre-initialized defaults (False, 1.0)
+
+            # Process Lithology Data if applicable
             if st.session_state.analysis_mode in ["collar_litho", "all"]:
-                litho_df = process_litho_data(litho_file, file_format)
-                st.session_state.litho_dict = None
+                if litho_file is not None and hasattr(litho_file, 'seek'):
+                    litho_file.seek(0)
+                litho_df = process_litho_data(litho_file, file_format) # Assign to local var
+                
+                st.session_state.litho_dict = None # Reset or initialize
                 if litho_dict_file:
+                    if hasattr(litho_dict_file, 'seek'):
+                        litho_dict_file.seek(0)
                     st.session_state.litho_dict = process_litho_dict(litho_dict_file, file_format)
+            
+            # Perform merging using the local assay_df, litho_df and current session state/defaults
+            # Ensure element_cols passed is always a list
+            elements_for_merge = st.session_state.element_cols if isinstance(st.session_state.element_cols, list) else []
+
             st.session_state.merged_df, st.session_state.viz_litho_df = process_and_merge_data(
                 st.session_state.collar_df, 
-                assay_df, 
-                litho_df, 
-                st.session_state.element_cols, 
+                assay_df,  # Use the local variable
+                litho_df,  # Use the local variable
+                elements_for_merge, 
                 composite_enabled, 
                 composite_length
             )
+
             if st.session_state.merged_df is not None:
                 st.success("Data loaded and processed successfully!")
                 st.write("Preview of processed data:")
                 st.write(st.session_state.merged_df.head())
             else:
-                st.error("Failed to process data. Please check your inputs.")
+                st.error("Failed to process or merge data. Please check your inputs and file contents.")
+                # Ensure session state reflects failure if merging fails
+                st.session_state.merged_df = None 
+                st.session_state.viz_litho_df = None
+        else:
+            # Collar processing failed
+            st.error("Collar data processing failed. Cannot proceed.")
+            st.session_state.merged_df = None
+            st.session_state.viz_litho_df = None
+            st.session_state.element_cols = [] # Ensure reset
+    else:
+        st.warning("Invalid data combination. Please check that you have uploaded the required files.")
+
+
+        
+# =============================================================================
+# ML EXPLAIN (SHAP ANALYSIS) TAB
+# =============================================================================
+with tab_ml_explain:
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🏷️ ML Explain</h2>", unsafe_allow_html=True)
+
+    st.write("This tab allows you to run SHAP analysis for model explanations using an element as the target.")
+    
+    # Make sure matplotlib is imported
+    import matplotlib.pyplot as plt
+    
+    if "merged_df" not in st.session_state or st.session_state.merged_df is None:
+        st.warning("Please load data first in the Data Loading tab.")
+    else:
+        st.subheader("SHAP Analysis Options")
+        
+        target_element = None
+        if (hasattr(st.session_state, 'analysis_mode') and 
+            st.session_state.analysis_mode in ["collar_assay", "all"] and 
+            hasattr(st.session_state, 'element_cols') and st.session_state.element_cols):
+            target_element = st.selectbox("Select target element for SHAP analysis", st.session_state.element_cols)
+        else:
+            st.error("Elemental data is not available or analysis mode is not set appropriately for SHAP analysis.")
+        
+        subset_option = st.radio("Select data subset for SHAP analysis", ("All Data", "Specific Cluster", "Specific Lithology"))
+        shap_df = st.session_state.merged_df.copy()
+        
+        if subset_option == "Specific Cluster":
+            if "Cluster" in shap_df.columns:
+                clusters = sorted(shap_df["Cluster"].astype(str).unique())
+                selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
+                shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
+            else:
+                st.warning("No clustering data available. Running SHAP on all data.")
+        elif subset_option == "Specific Lithology":
+            if "LITHO" in shap_df.columns:
+                lithos = sorted(shap_df["LITHO"].astype(str).unique())
+                selected_lithos = st.multiselect("Select lithologies", lithos, default=lithos)
+                shap_df = shap_df[shap_df["LITHO"].astype(str).isin(selected_lithos)]
+            else:
+                st.warning("No lithology data available. Running SHAP on all data.")
+        
+        if target_element:
+            if st.button("Run SHAP Analysis"):
+                exclude_cols = ['HOLE_ID', 'FROM', 'TO', 'EASTING', 'NORTHING', 'ELEVATION', 'DIP', 'AZIMUTH',
+                                'MIDPOINT', 'dx', 'dy', 'dz', 'x', 'y', 'z', 'LITHO', 'Cluster']
+                
+                model_cols = [col for col in shap_df.columns
+                              if col not in exclude_cols
+                              and pd.api.types.is_numeric_dtype(shap_df[col])
+                              and col != target_element]
+                
+                if not model_cols:
+                    st.error("No suitable features available for SHAP analysis after filtering.")
+                elif target_element not in shap_df.columns:
+                    st.error(f"Target element '{target_element}' not found in the dataframe.")
+                elif shap_df[model_cols].empty or shap_df[target_element].empty:
+                    st.error("Feature set or target data is empty after subsetting. Cannot train model.")
+                else:
+                    st.subheader("Training Model for SHAP Analysis")
+                    st.write(f"Target: {target_element}")
+                    st.write(f"Number of features: {len(model_cols)}")
+                    st.write(f"Number of samples: {len(shap_df)}")
+                    
+                    from sklearn.ensemble import RandomForestRegressor
+                    
+                    X = shap_df[model_cols].fillna(0)
+                    y = shap_df[target_element].fillna(0)
+                    
+                    if X.empty:
+                        st.error("Feature data (X) is empty. Cannot train model.")
+                    else:
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X, y)
+                        st.success("Model trained successfully.")
+                        
+                        st.subheader("Computing SHAP Values")
+                        import shap
+                        explainer = shap.TreeExplainer(model)
+                        shap_values = explainer.shap_values(X)
+                        
+                        st.subheader("SHAP Summary Plot (Bar)")
+                        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
+                        shap.summary_plot(shap_values, X, plot_type="bar", show=False)
+                        st.pyplot(fig_bar)
+                        
+                        st.subheader("SHAP Beeswarm Plot")
+                        fig_beeswarm, ax_beeswarm = plt.subplots(figsize=(10, 6))
+                        shap.summary_plot(shap_values, X, show=False)
+                        st.pyplot(fig_beeswarm)
+        elif st.session_state.merged_df is not None:
+             st.info("Please select a target element to proceed with SHAP analysis.")
 
 with tab_viz:
-    st.header("3D Visualisation")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📏 3D Visualisation</h2>", unsafe_allow_html=True)
     if st.session_state.merged_df is not None:
         original_merged_df = st.session_state.merged_df.copy()
         st.session_state.viz_df = st.session_state.merged_df.copy()
@@ -2059,17 +2604,126 @@ with tab_viz:
 
             update_figure_layout(fig, vertical_exaggeration)
             st.plotly_chart(fig)
+            # Store figure and add download button
+            st.session_state.main_3d_figure = fig
+            html_string, filename = create_html_download(fig, "3D_visualisation")
+            st.download_button(
+                label="📊 Download 3D Visualisation (HTML)",
+                data=html_string,
+                file_name=filename,
+                mime="text/html",
+                help="Download interactive 3D plot as HTML file",
+                key="download_3d_viz"
+            )
         else:
             st.warning("Please select at least one visualisation type.")
+
+        # CROSS SECTION FUNCTIONALITY - MOVED BEFORE SWATH PLOTS
+        st.markdown("---")  # Add separator
+        st.markdown("<h3 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>✂️ Drill Fence Cross Sections</h3>", unsafe_allow_html=True)
+        
+        st.markdown("### Define Drill Fence Section")
+        st.write("Select drill holes to create a fence section. Lithology will display on the left side of drill traces, grades on the right side.")
+        
+        # Get unique hole coordinates for fence selection
+        hole_coords = st.session_state.collar_df[['HOLE_ID', 'EASTING', 'NORTHING']].copy()
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.write("**Select holes to create drill fence:**")
+            selected_holes_cross = st.multiselect(
+                "Choose the first and last hole in the fence line (minimum 2 required):",
+                hole_coords['HOLE_ID'].tolist(),
+                default=hole_coords['HOLE_ID'].tolist()[:3] if len(hole_coords) >= 3 else hole_coords['HOLE_ID'].tolist(),
+                key="cross_section_holes"
+            )
+        
+        with col2:
+            # Section width
+            section_width = st.slider("Section Width (m)", min_value=10.0, max_value=200.0, value=50.0, step=10.0, key="cross_section_width")
             
+            # Element selection
+            primary_element_cross = None
+            if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
+                primary_element_cross = st.selectbox("Grade element:", st.session_state.element_cols, key="cross_section_element")
+                use_log_scale_cross = st.checkbox("Use log scale for grades", value=True, key="cross_section_log")
+        
+        if len(selected_holes_cross) >= 2:
+            fence_holes = hole_coords[hole_coords['HOLE_ID'].isin(selected_holes_cross)]
+            
+            # Use first and last holes from the selected list (no PCA sorting)
+            first_hole = fence_holes[fence_holes['HOLE_ID'] == selected_holes_cross[0]].iloc[0]
+            last_hole = fence_holes[fence_holes['HOLE_ID'] == selected_holes_cross[-1]].iloc[0]
+            
+            section_line_start = [first_hole['EASTING'], first_hole['NORTHING']]
+            section_line_end = [last_hole['EASTING'], last_hole['NORTHING']]
+            
+            st.success(f"Drill fence from **{first_hole['HOLE_ID']}** to **{last_hole['HOLE_ID']}** ({len(selected_holes_cross)} holes selected)")
+            
+            # Show section line on map
+            st.subheader("Drill Fence Location")
+            map_fig = create_section_line_map(
+                st.session_state.merged_df, 
+                st.session_state.collar_df,
+                section_line_start, 
+                section_line_end, 
+                section_width
+            )
+            
+            # Highlight selected holes on the map
+            selected_hole_coords = hole_coords[hole_coords['HOLE_ID'].isin(selected_holes_cross)]
+            map_fig.add_trace(go.Scatter(
+                x=selected_hole_coords['EASTING'],
+                y=selected_hole_coords['NORTHING'],
+                mode='markers+text',
+                marker=dict(size=12, color='blue', symbol='triangle-up'),
+                name='Selected Holes',
+                hovertemplate="<b>Selected Hole:</b> %{text}<extra></extra>"
+            ))
+            
+            st.plotly_chart(map_fig, use_container_width=True)
+            
+            # Generate cross-section
+            if st.button("Generate Drill Fence Cross Section", type="primary", key="generate_cross_section"):
+                with st.spinner("Generating drill fence cross-section..."):
+                    fig_cross = create_drill_fence_cross_section(
+                        st.session_state.merged_df,
+                        st.session_state.viz_litho_df,
+                        st.session_state.collar_df,
+                        section_line_start,
+                        section_line_end,
+                        section_width,
+                        primary_element_cross,
+                        use_log_scale_cross if 'use_log_scale_cross' in locals() else True,
+                        st.session_state.litho_dict
+                    )
+                    
+                    if fig_cross:
+                        st.subheader("Drill Fence Cross Section")
+                        st.plotly_chart(fig_cross, use_container_width=True)
+                        
+                        # Add some explanatory text
+                        st.info("📍 **Reading the Cross Section:**\n"
+                               "- **Black lines** = Drill hole traces\n"
+                               "- **Left side (coloured bars)** = Lithology intervals\n" 
+                               "- **Right side (coloured dots)** = Grade values\n"
+                               "- **Red triangles** = Collar locations with hole IDs")
+                    else:
+                        st.warning("No data found in the specified drill fence area. Try adjusting the section width or selecting different holes.")
+        else:
+            st.warning("⚠️ Please select at least 2 holes to create a drill fence section.")
+
+        # SWATH PLOTS 
         if st.session_state.analysis_mode in ["collar_assay", "all"] and 'primary_element' in locals():
             if not st.session_state.merged_df.empty:
                 create_swath_plots(st.session_state.merged_df, primary_element, use_log_scale)
+            
     else:
         st.warning("Please load data in the Data Loading tab first.")
 
 with tab_stats:
-    st.header("Statistical Analysis")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📈 Statistical Analysis</h2>", unsafe_allow_html=True)
     
     if st.session_state.merged_df is not None:
         if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
@@ -2230,7 +2884,7 @@ with tab_stats:
         st.warning("Please load data in the Data Loading tab first.")
 
 with tab_clustering:
-    st.header("Geochemical Clustering")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>⚇ Geochemical Clustering</h2>", unsafe_allow_html=True)
     if st.session_state.merged_df is not None and st.session_state.analysis_mode in ["collar_assay", "all"]:
         if 'selected_cluster_features' not in state or state.selected_cluster_features is None:
             state.selected_cluster_features = st.session_state.element_cols[:min(5, len(st.session_state.element_cols))]
@@ -2815,13 +3469,458 @@ with tab_clustering:
                             add_collar_points(fig, viz_collar_df, x_offset=offsets["Lithology"])
                     update_figure_layout(fig, vertical_exaggeration)
                     st.plotly_chart(fig, key="previous_cluster_viz_plot")
+
+                    # Store figure and add download button
+                    st.session_state.cluster_3d_figure = fig
+                    html_string, filename = create_html_download(fig, "cluster_visualisation")
+                    st.download_button(
+                        label="🔬 Download Cluster Plot (HTML)",
+                        data=html_string,
+                        file_name=filename,
+                        mime="text/html",
+                        help="Download interactive cluster plot as HTML file",
+                        key="download_cluster_viz"
+                    )
+                    
+
+                    st.markdown("---")  
+                    st.markdown("<h4 style='color: #2a5298;'>✂️ Cluster Cross Sections</h4>", unsafe_allow_html=True)
+                    
+                    st.write("Create cross sections showing cluster distribution along drill fence lines.")
+                    
+                    # Get unique hole coordinates for fence selection
+                    hole_coords_cluster = st.session_state.collar_df[['HOLE_ID', 'EASTING', 'NORTHING']].copy()
+                    
+                    col1_cluster, col2_cluster = st.columns([2, 1])
+                    
+                    with col1_cluster:
+                        st.write("**Select holes for cluster cross section:**")
+                        selected_holes_cluster_cross = st.multiselect(
+                            "Choose holes for fence line (minimum 2 required):",
+                            hole_coords_cluster['HOLE_ID'].tolist(),
+                            default=hole_coords_cluster['HOLE_ID'].tolist()[:3] if len(hole_coords_cluster) >= 3 else hole_coords_cluster['HOLE_ID'].tolist(),
+                            key="cluster_cross_section_holes"
+                        )
+                    
+                    with col2_cluster:
+                        # Section width
+                        section_width_cluster = st.slider("Section Width (m)", min_value=10.0, max_value=200.0, value=50.0, step=10.0, key="cluster_cross_section_width")
+                        
+                        # Additional display options
+                        show_lithology = False
+                        show_grades = False
+                        primary_element_cluster_cross = None
+                        use_log_scale_cluster_cross = True
+                        
+                        # Check if lithology data is available
+                        if (st.session_state.viz_litho_df is not None and 
+                            not st.session_state.viz_litho_df.empty and 
+                            'LITHO' in st.session_state.merged_df.columns):
+                            show_lithology = st.checkbox("Show lithology (left side)", value=True, key="cluster_cross_show_litho")
+                        
+                        if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
+                            show_grades = st.checkbox("Show grades (right side)", value=False, key="cluster_cross_show_grades")
+                            if show_grades:
+                                primary_element_cluster_cross = st.selectbox("Grade element:", st.session_state.element_cols, key="cluster_cross_section_element")
+                                use_log_scale_cluster_cross = st.checkbox("Use log scale for grades", value=True, key="cluster_cross_section_log")
+                    
+                    if len(selected_holes_cluster_cross) >= 2:
+                        fence_holes_cluster = hole_coords_cluster[hole_coords_cluster['HOLE_ID'].isin(selected_holes_cluster_cross)]
+                        
+                        # Use first and last holes from the selected list
+                        first_hole_cluster = fence_holes_cluster[fence_holes_cluster['HOLE_ID'] == selected_holes_cluster_cross[0]].iloc[0]
+                        last_hole_cluster = fence_holes_cluster[fence_holes_cluster['HOLE_ID'] == selected_holes_cluster_cross[-1]].iloc[0]
+                        
+                        section_line_start_cluster = [first_hole_cluster['EASTING'], first_hole_cluster['NORTHING']]
+                        section_line_end_cluster = [last_hole_cluster['EASTING'], last_hole_cluster['NORTHING']]
+                        
+                        st.success(f"Cluster cross section from **{first_hole_cluster['HOLE_ID']}** to **{last_hole_cluster['HOLE_ID']}** ({len(selected_holes_cluster_cross)} holes selected)")
+                        
+                        # Show section line on map
+                        st.subheader("Cross Section Location")
+                        map_fig_cluster = create_section_line_map(
+                            st.session_state.merged_df, 
+                            st.session_state.collar_df,
+                            section_line_start_cluster, 
+                            section_line_end_cluster, 
+                            section_width_cluster
+                        )
+                        
+                        # Highlight selected holes and color by cluster if available
+                        if 'Cluster' in st.session_state.merged_df.columns:
+                            # Add cluster information to the map
+                            cluster_hole_info = st.session_state.merged_df.groupby('HOLE_ID')['Cluster'].agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else -1).reset_index()
+                            selected_hole_coords_cluster = hole_coords_cluster[hole_coords_cluster['HOLE_ID'].isin(selected_holes_cluster_cross)]
+                            selected_hole_coords_cluster = selected_hole_coords_cluster.merge(cluster_hole_info, on='HOLE_ID', how='left')
+                            
+                            for cluster in sorted(selected_hole_coords_cluster['Cluster'].unique()):
+                                if cluster >= 0:
+                                    cluster_holes = selected_hole_coords_cluster[selected_hole_coords_cluster['Cluster'] == cluster]
+                                    map_fig_cluster.add_trace(go.Scatter(
+                                        x=cluster_holes['EASTING'],
+                                        y=cluster_holes['NORTHING'],
+                                        mode='markers+text',
+                                        marker=dict(size=12, color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)], symbol='triangle-up'),
+                                        text=cluster_holes['HOLE_ID'],
+                                        textposition='top center',
+                                        name=f'Cluster {cluster} Holes',
+                                        hovertemplate="<b>Hole:</b> %{text}<br><b>Cluster:</b> " + str(cluster) + "<extra></extra>"
+                                    ))
+                        
+                        st.plotly_chart(map_fig_cluster, use_container_width=True)
+                        
+                        # Generate cross-section
+                        if st.button("Generate Cluster Cross Section", type="primary", key="generate_cluster_cross_section"):
+                            with st.spinner("Generating cluster cross-section..."):
+                                # Create cluster cross section
+                                cluster_cross_df = st.session_state.merged_df[st.session_state.merged_df['Cluster'] >= 0].copy()
+                                
+                                # Calculate section line parameters
+                                start_x, start_y = section_line_start_cluster
+                                end_x, end_y = section_line_end_cluster
+                                line_dx = end_x - start_x
+                                line_dy = end_y - start_y
+                                line_length = np.sqrt(line_dx**2 + line_dy**2)
+                                
+                                if line_length == 0:
+                                    st.error("Section line start and end points cannot be the same")
+                                else:
+                                    # Unit vectors
+                                    line_unit_x = line_dx / line_length
+                                    line_unit_y = line_dy / line_length
+                                    perp_unit_x = -line_unit_y
+                                    perp_unit_y = line_unit_x
+                                    
+                                    # Filter data points within section width
+                                    section_data = []
+                                    for idx, row in cluster_cross_df.iterrows():
+                                        to_point_x = row['x'] - start_x
+                                        to_point_y = row['y'] - start_y
+                                        along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+                                        perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+                                        
+                                        if (abs(perp_dist) <= section_width_cluster/2 and 
+                                            0 <= along_line <= line_length):
+                                            row_dict = row.to_dict()
+                                            row_dict['section_distance'] = along_line
+                                            row_dict['perp_distance'] = perp_dist
+                                            section_data.append(row_dict)
+                                    
+                                    if section_data:
+                                        section_df = pd.DataFrame(section_data)
+                                        
+                                        # Create the cross-section plot
+                                        fig_cross_cluster = go.Figure()
+                                        
+                                        # Offset for displaying different data types
+                                        cluster_offset = 0       # Clusters on drill trace (center)
+                                        litho_offset = -5        # Lithology on left side
+                                        grade_offset = 5         # Grades on right side
+                                        
+                                        # Add lithology intervals if selected and available
+                                        if (show_lithology and 
+                                            st.session_state.viz_litho_df is not None and 
+                                            not st.session_state.viz_litho_df.empty):
+                                            
+                                            # Filter lithology data for the cross section
+                                            litho_section_data = []
+                                            for idx, row in st.session_state.viz_litho_df.iterrows():
+                                                to_point_x = row['x'] - start_x
+                                                to_point_y = row['y'] - start_y
+                                                along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+                                                perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+                                                
+                                                if (abs(perp_dist) <= section_width_cluster/2 and 
+                                                    0 <= along_line <= line_length):
+                                                    row_dict = row.to_dict()
+                                                    row_dict['section_distance'] = along_line
+                                                    row_dict['perp_distance'] = perp_dist
+                                                    litho_section_data.append(row_dict)
+                                            
+                                            if litho_section_data:
+                                                litho_section_df = pd.DataFrame(litho_section_data)
+                                                
+                                                # Group by hole and create lithology intervals
+                                                unique_lithos = litho_section_df['LITHO'].unique()
+                                                color_palette = px.colors.qualitative.Set1
+                                                litho_colors = {litho: color_palette[i % len(color_palette)] for i, litho in enumerate(unique_lithos)}
+                                                
+                                                legend_added = set()
+                                                
+                                                for hole_id in litho_section_df['HOLE_ID'].unique():
+                                                    hole_litho_data = litho_section_df[litho_section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+                                                    
+                                                    for _, interval in hole_litho_data.iterrows():
+                                                        litho_code = interval['LITHO']
+                                                        # Safe handling of litho_dict
+                                                        litho_desc = ""
+                                                        if st.session_state.litho_dict and litho_code in st.session_state.litho_dict:
+                                                            litho_desc = st.session_state.litho_dict[litho_code]
+                                                        legend_name = f"{litho_code} {litho_desc}".strip() if litho_desc else litho_code
+                                                        
+                                                        show_legend = legend_name not in legend_added
+                                                        if show_legend:
+                                                            legend_added.add(legend_name)
+                                                        
+                                                        # Calculate interval positions in 3D space
+                                                        azimuth_rad = np.radians(90 - interval['AZIMUTH'])
+                                                        dip_rad = np.radians(-interval['DIP'])
+                                                        
+                                                        # FROM point
+                                                        from_depth = interval['FROM']
+                                                        from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                                                        from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                                                        from_dz = from_depth * np.sin(dip_rad)
+                                                        from_x = interval['EASTING'] + from_dx
+                                                        from_y = interval['NORTHING'] + from_dy
+                                                        from_z = interval['ELEVATION'] - from_dz
+                                                        
+                                                        # TO point
+                                                        to_depth = interval['TO']
+                                                        to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
+                                                        to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
+                                                        to_dz = to_depth * np.sin(dip_rad)
+                                                        to_x = interval['EASTING'] + to_dx
+                                                        to_y = interval['NORTHING'] + to_dy
+                                                        to_z = interval['ELEVATION'] - to_dz
+                                                        
+                                                        # Project onto section line
+                                                        from_to_point_x = from_x - start_x
+                                                        from_to_point_y = from_y - start_y
+                                                        from_along = from_to_point_x * line_unit_x + from_to_point_y * line_unit_y
+                                                        
+                                                        to_to_point_x = to_x - start_x
+                                                        to_to_point_y = to_y - start_y
+                                                        to_along = to_to_point_x * line_unit_x + to_to_point_y * line_unit_y
+                                                        
+                                                        # Add lithology intervals on left side
+                                                        fig_cross_cluster.add_trace(go.Scatter(
+                                                            x=[from_along + litho_offset, to_along + litho_offset],
+                                                            y=[from_z, to_z],
+                                                            mode='lines',
+                                                            line=dict(width=20, color=litho_colors[litho_code]),
+                                                            name=legend_name,
+                                                            legendgroup=f"litho_{legend_name}",
+                                                            showlegend=show_legend,
+                                                            hovertemplate=(
+                                                                f"<b>Hole:</b> {hole_id}<br>" +
+                                                                f"<b>Lithology:</b> {legend_name}<br>" +
+                                                                f"<b>From:</b> {interval['FROM']:.1f}m<br>" +
+                                                                f"<b>To:</b> {interval['TO']:.1f}m<br>" +
+                                                                "<extra></extra>"
+                                                            )
+                                                        ))
+                                        
+                                        # Add grades if selected
+                                        if show_grades and primary_element_cluster_cross:
+                                            hover_text_grade = []
+                                            for _, row in section_df.iterrows():
+                                                info = [
+                                                    f"<b>Hole ID:</b> {row['HOLE_ID']}",
+                                                    f"<b>{primary_element_cluster_cross}:</b> {row[primary_element_cluster_cross]:.2f}",
+                                                    f"<b>Cluster:</b> {row['Cluster']}",
+                                                    f"<b>From:</b> {row['FROM']:.2f}m",
+                                                    f"<b>To:</b> {row['TO']:.2f}m",
+                                                    f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
+                                                ]
+                                                hover_text_grade.append("<br>".join(info))
+                                            
+                                            # Color scale for grades
+                                            color_values = section_df[primary_element_cluster_cross]
+                                            min_val = section_df[primary_element_cluster_cross].min()
+                                            max_val = section_df[primary_element_cluster_cross].max()
+                                            
+                                            if use_log_scale_cluster_cross and min_val > 0:
+                                                log_min = np.floor(np.log10(min_val))
+                                                log_max = np.ceil(np.log10(max_val))
+                                                tick_vals = []
+                                                tick_text = []
+                                                for i in range(int(log_min), int(log_max) + 1):
+                                                    current = 10**i
+                                                    if min_val <= current <= max_val:
+                                                        tick_vals.append(current)
+                                                        tick_text.append(f'{current:.3g}')
+                                                if min_val not in tick_vals:
+                                                    tick_vals.insert(0, min_val)
+                                                    tick_text.insert(0, f'{min_val:.2f}')
+                                                if max_val not in tick_vals:
+                                                    tick_vals.append(max_val)
+                                                    tick_text.append(f'{max_val:.2f}')
+                                            else:
+                                                tick_vals = np.linspace(min_val, max_val, 6)
+                                                tick_text = [f'{v:.3f}' for v in tick_vals]
+                                            
+                                            # Add grade points on right side
+                                            fig_cross_cluster.add_trace(go.Scatter(
+                                                x=section_df['section_distance'] + grade_offset,
+                                                y=section_df['z'],
+                                                mode='markers',
+                                                marker=dict(
+                                                    size=12,
+                                                    color=color_values,
+                                                    colorscale='rdylbu',
+                                                    reversescale=True,
+                                                    showscale=True,
+                                                    colorbar=dict(
+                                                        title=f"{primary_element_cluster_cross} Grade",
+                                                        len=0.75,
+                                                        tickmode='array',
+                                                        tickvals=tick_vals,
+                                                        ticktext=tick_text,
+                                                        x=1.02
+                                                    ),
+                                                    cmin=min_val,
+                                                    cmax=max_val,
+                                                    symbol='square'
+                                                ),
+                                                text=hover_text_grade,
+                                                hovertemplate="%{text}<extra></extra>",
+                                                name=f'{primary_element_cluster_cross} Grade'
+                                            ))
+                                        
+                                        
+                                        # Add drill hole traces
+                                        collar_section_data = []
+                                        for idx, row in st.session_state.collar_df.iterrows():
+                                            to_point_x = row['EASTING'] - start_x
+                                            to_point_y = row['NORTHING'] - start_y
+                                            along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
+                                            perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
+                                            
+                                            if (abs(perp_dist) <= section_width_cluster/2 and 
+                                                0 <= along_line <= line_length):
+                                                collar_section_data.append({
+                                                    'HOLE_ID': row['HOLE_ID'],
+                                                    'section_distance': along_line,
+                                                    'elevation': row['ELEVATION'],
+                                                    'perp_distance': perp_dist
+                                                })
+                                        
+                                        collar_section_dict = {c['HOLE_ID']: c for c in collar_section_data}
+                                        
+                                        # Add drill traces
+                                        for hole_id in section_df['HOLE_ID'].unique():
+                                            hole_data = section_df[section_df['HOLE_ID'] == hole_id].sort_values('FROM')
+                                            
+                                            if hole_id in collar_section_dict:
+                                                collar_point = collar_section_dict[hole_id]
+                                                trace_points = [(collar_point['section_distance'], collar_point['elevation'])]
+                                                for _, row in hole_data.iterrows():
+                                                    trace_points.append((row['section_distance'], row['z']))
+                                                
+                                                trace_x, trace_y = zip(*trace_points)
+                                                fig_cross_cluster.add_trace(go.Scatter(
+                                                    x=trace_x,
+                                                    y=trace_y,
+                                                    mode='lines',
+                                                    line=dict(color='gray', width=2),
+                                                    showlegend=False,
+                                                    hoverinfo='skip',
+                                                    name=f'Trace {hole_id}'
+                                                ))
+                                        # Add cluster points ON the drill trace (center)
+                                        for cluster in sorted(section_df['Cluster'].unique()):
+                                            if cluster >= 0:
+                                                cluster_data = section_df[section_df['Cluster'] == cluster]
+                                                
+                                                hover_text = []
+                                                for _, row in cluster_data.iterrows():
+                                                    info = [
+                                                        f"<b>Hole ID:</b> {row['HOLE_ID']}",
+                                                        f"<b>Cluster:</b> {cluster}",
+                                                        f"<b>From:</b> {row['FROM']:.2f}m",
+                                                        f"<b>To:</b> {row['TO']:.2f}m",
+                                                        f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
+                                                    ]
+                                                    # Safe handling of LITHO column
+                                                    if 'LITHO' in row and pd.notna(row['LITHO']):
+                                                        info.append(f"<b>Lithology:</b> {row['LITHO']}")
+                                                    if primary_element_cluster_cross and primary_element_cluster_cross in row:
+                                                        info.append(f"<b>{primary_element_cluster_cross}:</b> {row[primary_element_cluster_cross]:.2f}")
+                                                    hover_text.append("<br>".join(info))
+                                                
+                                                fig_cross_cluster.add_trace(go.Scatter(
+                                                    x=cluster_data['section_distance'] + cluster_offset,
+                                                    y=cluster_data['z'],
+                                                    mode='markers',
+                                                    marker=dict(
+                                                        size=15,
+                                                        color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)],
+                                                        symbol='circle',
+                                                        line=dict(width=2, color='black')  # Add black outline for visibility
+                                                    ),
+                                                    text=hover_text,
+                                                    hovertemplate="%{text}<extra></extra>",
+                                                    name=f'Cluster {cluster}'
+                                                ))                                        
+                                        # Add collar points
+                                        if collar_section_data:
+                                            collar_section_df = pd.DataFrame(collar_section_data)
+                                            fig_cross_cluster.add_trace(go.Scatter(
+                                                x=collar_section_df['section_distance'],
+                                                y=collar_section_df['elevation'],
+                                                mode='markers+text',
+                                                marker=dict(size=10, color='red', symbol='triangle-up'),
+                                                text=collar_section_df['HOLE_ID'],
+                                                textposition='top center',
+                                                textfont=dict(size=10, color='red'),
+                                                name='Collars',
+                                                hovertemplate="<b>Hole:</b> %{customdata}<br><b>Collar</b><extra></extra>",
+                                                customdata=collar_section_df['HOLE_ID']
+                                            ))
+                                        
+                                        # Calculate section azimuth for title
+                                        section_azimuth = np.degrees(np.arctan2(line_dx, line_dy))
+                                        if section_azimuth < 0:
+                                            section_azimuth += 360
+                                        
+                                        # Layout
+                                        fig_cross_cluster.update_layout(
+                                            title=f"Cluster Cross Section - Azimuth: {section_azimuth:.1f}° - Length: {line_length:.1f}m - Width: {section_width_cluster:.1f}m",
+                                            xaxis_title="Distance along section (m)",
+                                            yaxis_title="Elevation (m)",
+                                            height=900,
+                                            width=1600,
+                                            legend=dict(
+                                                yanchor="top",
+                                                y=0.99,
+                                                xanchor="left",
+                                                x=1.15,
+                                                bgcolor="rgba(255, 255, 255, 0.8)",
+                                                bordercolor="rgba(0, 0, 0, 0.3)",
+                                                borderwidth=1
+                                            ),
+                                            margin=dict(r=300, l=50, t=80, b=50)
+                                        )
+                                        
+                                        st.subheader("Cluster Cross Section")
+                                        st.plotly_chart(fig_cross_cluster, use_container_width=True)
+                                        
+                                        # Add explanatory text
+                                        explanation = "📍 **Reading the Cluster Cross Section:**\n"
+                                        explanation += "- **Gray lines** = Drill hole traces\n"
+                                        explanation += "- **Colored circles (center)** = Cluster assignments on drill traces\n"
+                                        if show_lithology:
+                                            explanation += "- **Left side (colored bars)** = Lithology intervals\n"
+                                        if show_grades:
+                                            explanation += "- **Right side (colored squares)** = Grade values\n"
+                                        explanation += "- **Red triangles** = Collar locations with hole IDs"
+                                        
+                                        st.info(explanation)
+                                    else:
+                                        st.warning("No cluster data found in the specified cross section area. Try adjusting the section width or selecting different holes.")
+                    else:
+                        st.warning("⚠️ Please select at least 2 holes to create a cluster cross section.")
                 else:
                     st.warning("No cluster data available for visualisation after applying filters.")
         else:
             st.warning("No cluster data available. Please run clustering analysis first.")
 
 with tab_download:
-    st.header("Download Data")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>💾 Download Data</h2>", unsafe_allow_html=True)
+
+
+
     if st.session_state.merged_df is not None:
         download_cols = st.columns(4)
         with download_cols[0]:
@@ -2890,8 +3989,8 @@ with tab_download:
 
 # =============================================================================
 with tab_llm:
-    st.header("AI GEO Analysis")
-    
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🤖 AI GEO Analysis</h2>", unsafe_allow_html=True)
+
     # Initialise chat history and input management in session state
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -3024,11 +4123,20 @@ with tab_llm:
                             follow_up_prompt = f"{conversation_context}\n\nUser's follow-up question: {question}\n\nProvide a detailed, helpful response while maintaining your role as a geological expert."
                             
                             # Get LLM response
-                            client = genai.Client(api_key=st.session_state.google_api_key)
-                            response = client.models.generate_content(
-                                model="gemini-2.5-flash-preview-04-17",
-                                contents=follow_up_prompt
-                            )
+                            model_for_followup = st.session_state.get('google_model')
+                            response = None # Initialize response
+
+                            if not model_for_followup:
+                                st.error("Please ensure a Google AI Model name is entered in the sidebar for follow-up questions.")
+                                # Remove the last user message since the call won't be made
+                                if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                                    st.session_state.chat_history.pop()
+                            else:
+                                client = genai.Client(api_key=st.session_state.google_api_key)
+                                response = client.models.generate_content(
+                                    model=model_for_followup,
+                                    contents=follow_up_prompt
+                                )
                             
                             if response is not None and hasattr(response, "text") and response.text:
                                 # Add the response to chat history
@@ -3043,10 +4151,18 @@ with tab_llm:
                                 st.session_state.current_question = ""
                                 
                                 st.rerun()  # Refresh to show the new messages
-                            else:
+                            elif model_for_followup: # Only show this error if a model was specified but response was bad
                                 st.error("Received an empty response from the LLM.")
+                                # Remove the last user message if the AI failed to respond
+                                if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                                    st.session_state.chat_history.pop()
+
+
                         except Exception as e:
                             st.error(f"Error processing follow-up: {e}")
+                            # Remove the last user message on exception
+                            if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+                                st.session_state.chat_history.pop()
     
     with col3:
         # Button to clear history and start over
@@ -3068,16 +4184,19 @@ with tab_llm:
     # Show explanation of what's happening
     with st.expander("How does this work?"):
         st.markdown("""
-        1. First, provide your Google Gemini API key in the sidebar and optional geological context
-        2. Click 'Generate Initial Summary' to analyze your drill hole data
-        3. The AI will create an initial interpretation based on your data
-        4. You can then ask follow-up questions or provide additional information
-        5. The system maintains the conversation context throughout your session
-        6. Click 'Clear Conversation' to start over with a fresh analysis
+        1. First, provide your Google Gemini API key and the specific Google AI Model name in the sidebar. You can also add optional geological context.
+        2. Click 'Generate Initial Summary' to analyse your drill hole data using the specified model.
+        3. The AI will create an initial interpretation based on your data.
+        4. You can then ask follow-up questions or provide additional information.
+        5. The system maintains the conversation context throughout your session.
+        6. Click 'Clear Conversation' to start over with a fresh analysis.
         """)
 
+
 with tab_qa:
-    st.header("📋 Data Analysis Playground")
+    st.header("")
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📋 Data Analysis Playground</h2>", unsafe_allow_html=True)
+
     df = st.session_state.get("merged_df")
     if df is None or df.empty:
         st.warning("Please load and process data first.")
@@ -3109,144 +4228,160 @@ The following packages are already available: pandas as pd, numpy as np, matplot
 Just write clean Python code that can be directly executed.
 """
                 try:
-                    client = genai.Client(api_key=st.session_state.google_api_key)
-                    # Standard method call
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash-preview-04-17", # Using a faster model, you can replace with "gemini-2.5-flash-preview-04-17" for more complex analysis
-                        contents=prompt
-                    )
-                    raw_code = response.text or ""
-                    
-                    # Clean the code by removing markdown code fences and import statements
-                    code_clean = raw_code
-                    # Remove code fence start if present
-                    if "```" in code_clean:
-                        parts = code_clean.split("```")
-                        for i, part in enumerate(parts):
-                            if i % 2 == 1:  # This is inside a code fence
-                                if part.startswith("python\n"):
-                                    parts[i] = part[7:]  # Remove "python\n"
-                                elif part.startswith("python"):
-                                    parts[i] = part[6:]  # Remove "python"
-                        # Join only the parts inside code fences
-                        cleaned_parts = []
-                        for i, part in enumerate(parts):
-                            if i % 2 == 1:  # This is inside a code fence
-                                cleaned_parts.append(part)
-                        if cleaned_parts:
-                            code_clean = "\n".join(cleaned_parts)
-                    
-                    # Filter out import lines and comments
-                    code_lines = []
-                    for line in code_clean.splitlines():
-                        if (not line.strip().startswith('import ') and 
-                            not line.strip().startswith('from ') and
-                            not line.strip().startswith('#')):
-                            code_lines.append(line)
-                    
-                    code_clean = '\n'.join(code_lines).strip()
-                    
-                    st.subheader("Generated Code")
-                    st.code(code_clean, language="python")
-                    
-                    # Import visualisation libraries here
-                    import matplotlib.pyplot as plt
-                    import plotly.express as px
-                    import plotly.graph_objects as go
-                    import io
-                    from PIL import Image
-                    
-                    # Execute the cleaned code with visualisation support
-                    local_env = {"df": df.copy(), "pd": pd, "np": np, "plt": plt, "px": px, "go": go}
-                    old_stdout = sys.stdout
-                    sys.stdout = mystdout = io.StringIO()
-                    
-                    # Set matplotlib to use a non-interactive backend
-                    plt.switch_backend('Agg')
-                    
-                    # Flag to track if any content was generated
-                    content_generated = False
-                    
-                    try:
-                        exec(code_clean, {}, local_env)
-                    except Exception as exec_error:
-                        sys.stdout = old_stdout
-                        st.error(f"Error executing the code: {exec_error}")
-                        st.error("Attempting to further clean the code...")
+                    # Ensure a model is specified by the user
+                    model_to_use_qa = st.session_state.get('google_model')
+                    if not model_to_use_qa: # Checks for None or empty string
+                        st.error("Please enter a Google AI Model name in the sidebar to use this feature.")
+                    else:
+                        client = genai.Client(api_key=st.session_state.google_api_key)
+                        # Standard method call
+                        response = client.models.generate_content(
+                            model=model_to_use_qa, 
+                            contents=prompt
+                        )
+                        raw_code = response.text or ""
                         
-                        # More aggressive cleaning for code with fences
-                        more_clean = raw_code
-                        if "```python" in more_clean:
-                            more_clean = more_clean.split("```python")[1]
-                        elif "```" in more_clean:
-                            more_clean = more_clean.split("```")[1]
+                        # Clean the code by removing markdown code fences and import statements
+                        code_clean = raw_code
+                        # Remove code fence start if present
+                        if "```" in code_clean:
+                            parts = code_clean.split("```")
+                            for i, part in enumerate(parts):
+                                if i % 2 == 1:  # This is inside a code fence
+                                    if part.startswith("python\n"):
+                                        parts[i] = part[7:]  # Remove "python\n"
+                                    elif part.startswith("python"):
+                                        parts[i] = part[6:]  # Remove "python"
+                            # Join only the parts inside code fences
+                            cleaned_parts = []
+                            for i, part in enumerate(parts):
+                                if i % 2 == 1:  # This is inside a code fence
+                                    cleaned_parts.append(part)
+                            if cleaned_parts:
+                                code_clean = "\n".join(cleaned_parts)
                         
-                        if "```" in more_clean:
-                            more_clean = more_clean.split("```")[0]
-                        
-                        # Remove import statements and comments
-                        clean_lines = []
-                        for line in more_clean.strip().splitlines():
+                        # Filter out import lines and comments
+                        code_lines = []
+                        for line in code_clean.splitlines():
                             if (not line.strip().startswith('import ') and 
                                 not line.strip().startswith('from ') and
                                 not line.strip().startswith('#')):
-                                clean_lines.append(line)
+                                code_lines.append(line)
                         
-                        more_clean = '\n'.join(clean_lines).strip()
+                        code_clean = '\n'.join(code_lines).strip()
                         
-                        st.subheader("Retrying with further cleaned code:")
-                        st.code(more_clean, language="python")
+                        st.subheader("Generated Code")
+                        st.code(code_clean, language="python")
+                        
+                        # Import visualisation libraries here
+                        import matplotlib.pyplot as plt
+                        import plotly.express as px
+                        import plotly.graph_objects as go
+                        import io
+                        # from PIL import Image # PIL.Image is not directly used for st.image with BytesIO
+
+                        # Execute the cleaned code with visualisation support
+                        local_env = {"df": df.copy(), "pd": pd, "np": np, "plt": plt, "px": px, "go": go}
+                        old_stdout = sys.stdout
+                        sys.stdout = mystdout = io.StringIO()
+                        
+                        # Set matplotlib to use a non-interactive backend
+                        plt.switch_backend('Agg')
+                        
+                        # Flag to track if any content was generated
+                        content_generated = False
                         
                         try:
-                            sys.stdout = mystdout = io.StringIO()
-                            exec(more_clean, {}, local_env)
-                        except Exception as retry_error:
-                            sys.stdout = old_stdout
-                            st.error(f"Retry also failed: {retry_error}")
-                            raise
-                    
-                    # Get text output
-                    sys.stdout = old_stdout
-                    output = mystdout.getvalue().strip()
-                    
-                    # Check for text output
-                    if output:
-                        st.subheader("Text Output")
-                        st.write(output)
-                        content_generated = True
-                    
-                    # Check for and display matplotlib figure - store figure count BEFORE displaying
-                    fig_count = len(plt.get_fignums())
-                    if fig_count > 0:
-                        st.subheader("Visualisation")
-                        fig = plt.gcf()  # Get current figure
-                        buf = io.BytesIO()
-                        fig.savefig(buf, format='png', bbox_inches='tight')
-                        buf.seek(0)
-                        st.image(buf)
-                        plt.close('all')  # Close all figures to free memory
-                        content_generated = True
-                    
-                    # Check for plotly figure in the local environment
-                    if 'fig' in local_env and hasattr(local_env['fig'], 'update_layout'):  # Ensure it's a plotly figure
-                        st.subheader("Interactive Visualisation")
-                        st.plotly_chart(local_env['fig'])
-                        content_generated = True
-                    
-                    # If no output was generated at all
-                    if not content_generated:
-                        st.warning("No output or visualisation was generated. Try rephrasing your question.")
+                            exec(code_clean, {}, local_env)
+                        except Exception as exec_error:
+                            sys.stdout = old_stdout # Restore stdout before further error handling
+                            st.error(f"Error executing the code: {exec_error}")
+                            st.error("Attempting to further clean the code...")
+                            
+                            # More aggressive cleaning for code with fences
+                            more_clean = raw_code # Start from original raw_code
+                            if "```python" in more_clean:
+                                more_clean = more_clean.split("```python", 1)[1] # Split only once
+                            elif "```" in more_clean:
+                                more_clean = more_clean.split("```", 1)[1] # Split only once
+                            
+                            if "```" in more_clean: # Check for closing fence
+                                more_clean = more_clean.rsplit("```", 1)[0] # Remove from the end
+                            
+                            # Remove import statements and comments from the more aggressively cleaned code
+                            clean_lines_retry = []
+                            for line_retry in more_clean.strip().splitlines():
+                                if (not line_retry.strip().startswith('import ') and 
+                                    not line_retry.strip().startswith('from ') and
+                                    not line_retry.strip().startswith('#')):
+                                    clean_lines_retry.append(line_retry)
+                            
+                            more_clean = '\n'.join(clean_lines_retry).strip()
+                            
+                            st.subheader("Retrying with further cleaned code:")
+                            st.code(more_clean, language="python")
+                            
+                            try:
+                                sys.stdout = mystdout = io.StringIO() # Re-assign for retry
+                                exec(more_clean, {}, local_env)
+                            except Exception as retry_error:
+                                sys.stdout = old_stdout # Restore stdout
+                                st.error(f"Retry also failed: {retry_error}")
+                                st.error("Traceback for retry:")
+                                import traceback
+                                st.code(traceback.format_exc())
+                                # Do not raise here, let the outer catch handle it or just display error
                         
+                        # Get text output
+                        sys.stdout = old_stdout # Ensure stdout is restored
+                        output = mystdout.getvalue().strip()
+                        
+                        # Check for text output
+                        if output:
+                            st.subheader("Text Output")
+                            st.write(output)
+                            content_generated = True
+                        
+                        # Check for and display matplotlib figure - store figure count BEFORE displaying
+                        # Ensure plt is the one from local_env if exec modified it, though unlikely for plt itself
+                        fig_count = len(plt.get_fignums()) 
+                        if fig_count > 0:
+                            st.subheader("Visualisation (Matplotlib)")
+                            # Iterate through all open figures if multiple were created
+                            for i in plt.get_fignums():
+                                fig_mpl = plt.figure(i) # Get figure by number
+                                buf = io.BytesIO()
+                                fig_mpl.savefig(buf, format='png', bbox_inches='tight')
+                                buf.seek(0)
+                                st.image(buf)
+                            plt.close('all')  # Close all figures to free memory
+                            content_generated = True
+                        
+                        # Check for plotly figure in the local environment
+                        if 'fig' in local_env and hasattr(local_env['fig'], 'update_layout'):  # Ensure it's a plotly figure
+                            st.subheader("Interactive Visualisation (Plotly)")
+                            st.plotly_chart(local_env['fig'])
+                            content_generated = True
+                        
+                        # If no output was generated at all
+                        if not content_generated and model_to_use_qa: # Only warn if an attempt was made
+                            st.warning("No output or visualisation was generated. The generated code might not produce direct output or the question was ambiguous. Try rephrasing your question.")
+                            
                 except Exception as e:
-                    if 'old_stdout' in locals():
+                    if 'old_stdout' in locals() and sys.stdout != old_stdout : # Check if stdout was redirected
                         sys.stdout = old_stdout
-                    st.error(f"Error in dynamic Q&A: {e}")
+                    st.error(f"An error occurred in the Data Analysis Playground: {e}")
                     st.error("Traceback:")
                     import traceback
                     st.code(traceback.format_exc())
+
         elif not st.session_state.google_api_key:
             st.info("Please enter your Google API Key in the sidebar to use this feature.")
-        
+        elif question and not st.session_state.google_model: # If question is asked but model is missing
+             if st.button("Get Answer", key="qa_button_no_model_check"): # Re-check button press
+                st.error("Please enter a Google AI Model name in the sidebar to use this feature.")
+
+
         with st.expander("Example Visualisation Questions"):
             st.markdown("""
             Try these example questions for generating visualisations:
@@ -3256,7 +4391,7 @@ Just write clean Python code that can be directly executed.
             - **Create a box plot of gold values by lithology**
             - **Make a bar chart showing average gold by HOLE_ID**
             - **Plot a correlation heatmap of all elemental values**
-            - **Create a 3D scatter plot of x, y, and z coordinates colored by gold values**
+            - **Create a 3D scatter plot of x, y, and z coordinates coloured by gold values**
             
             For more complex analysis:
             
