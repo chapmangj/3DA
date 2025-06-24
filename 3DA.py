@@ -1263,11 +1263,35 @@ class GradeShellGenerator:
         min_coords = full_data_bounds[['x', 'y', 'z']].min()
         max_coords = full_data_bounds[['x', 'y', 'z']].max()
         
+        # ===================================================================
+        buffer_percent = 0.40  # 10% buffer
+        x_range = max_coords['x'] - min_coords['x']
+        y_range = max_coords['y'] - min_coords['y']
+        z_range = max_coords['z'] - min_coords['z']
+        
+        x_buffer = x_range * buffer_percent
+        y_buffer = y_range * buffer_percent
+        z_buffer = z_range * buffer_percent
+
+        buffered_min_coords = pd.Series({
+            'x': min_coords['x'] - x_buffer,
+            'y': min_coords['y'] - y_buffer,
+            'z': min_coords['z'] - z_buffer
+        })
+        buffered_max_coords = pd.Series({
+            'x': max_coords['x'] + x_buffer,
+            'y': max_coords['y'] + y_buffer,
+            'z': max_coords['z'] + z_buffer
+        })
+        # ===================================================================
+
+        # Use the new buffered coordinates to create the grid
         grid_x_coords, grid_y_coords, grid_z_coords = np.mgrid[
-            min_coords['x']:max_coords['x']:complex(0, self.grid_resolution), 
-            min_coords['y']:max_coords['y']:complex(0, self.grid_resolution), 
-            min_coords['z']:max_coords['z']:complex(0, self.grid_resolution)
+            buffered_min_coords['x']:buffered_max_coords['x']:complex(0, self.grid_resolution), 
+            buffered_min_coords['y']:buffered_max_coords['y']:complex(0, self.grid_resolution), 
+            buffered_min_coords['z']:buffered_max_coords['z']:complex(0, self.grid_resolution)
         ]
+        
         grid_points_flat = np.vstack([grid_x_coords.ravel(), grid_y_coords.ravel(), grid_z_coords.ravel()]).T
         grid_transformed_flat = (grid_points_flat - mean_coord) @ rotation_matrix.T
 
@@ -1304,7 +1328,10 @@ class GradeShellGenerator:
         
         points = self.raw_data.sample(min(len(self.raw_data), 5000))
         cmax_value = self.raw_data[self.element].quantile(0.98)
-        fig.add_trace(go.Scatter3d(x=points['x'], y=points['y'], z=points['z'], mode='markers', text=points[self.element], hovertemplate=(f'<b>{self.element} Grade: %{{text:.2f}}</b><br><br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}<br>Z: %{{z:.1f}}<extra></extra>'), marker=dict(size=2, color=points[self.element], colorscale='Viridis', colorbar=dict(title=f'{self.element} Grade'), showscale=True, cmin=0, cmax=cmax_value), name='Drill Samples'))
+        
+        fig.add_trace(go.Scatter3d(x=points['x'], y=points['y'], z=points['z'], mode='markers', text=points[self.element], hovertemplate=(f'<b>{self.element} Grade: %{{text:.2f}}</b><br><br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}<br>Z: %{{z:.1f}}<extra></extra>'), 
+                                  marker=dict(size=5, color=points[self.element], colorscale='Viridis', colorbar=dict(title=f'{self.element} Grade'), showscale=True, cmin=0, cmax=cmax_value), 
+                                  name='Drill Samples'))
         
         grade_steps = []
         for i in range(len(slider_cutoffs)):
@@ -1330,15 +1357,13 @@ class GradeShellGenerator:
         )
 
         log_status = "Log-Transformed" if self.use_log_transform else "Standard"
-        # This layout call is now minimal - it only sets the title and sliders.
-        # Sizing and aspect ratio will be handled by the external function.
         fig.update_layout(
             title=f"Interactive Grade Shell ({log_status}) for {self.element}",
             sliders=[opacity_slider, grade_slider]
         )
         
         return fig
-    
+        
 
 def create_drill_fence_cross_section(merged_df, viz_litho_df, collar_df, section_line_start, section_line_end, section_width, primary_element=None, use_log_scale=True, litho_dict=None):
     """
@@ -2494,7 +2519,7 @@ with tab_data:
         st.warning("Invalid data combination. Please check that you have uploaded the required files.")
 
 with tab_gradeshell:
-    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>⛏️ Grade Shell Generation</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🩸 Grade Shell Generation</h2>", unsafe_allow_html=True)
     st.markdown("This tool generates a 3D grade shell using anisotropic linear interpolation. Adjust the parameters and click the button to begin.")
 
     if st.session_state.merged_df is not None and st.session_state.analysis_mode in ["collar_assay", "all"]:
