@@ -9,6 +9,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from streamlit import session_state as state
 from sklearn.preprocessing import MinMaxScaler, RobustScaler
+from scipy.interpolate import griddata
+from skimage.measure import marching_cubes
 from PIL import Image
 from google import genai
 import io
@@ -1181,6 +1183,163 @@ def update_figure_layout(fig, vertical_exaggeration=1.0):
         yaxis_range=[y_min, y_max],
         zaxis_range=[z_min, z_max]
     )
+
+
+# =============================================================================
+# GRADE SHELL GENERATION FUNCTIONS
+# =============================================================================
+def composite_for_shell(df, element_col, composite_length):
+    """
+    Composites drillhole data to a fixed length, including coordinates.
+    Assumes df has 'HOLE_ID', 'FROM', 'TO', 'x', 'y', 'z', and element_col.
+    """
+    df = df.sort_values(by=['HOLE_ID', 'FROM']).copy()
+    
+    all_composites = []
+    
+    for dhid, hole_data in df.groupby('HOLE_ID'):
+        start_depth = hole_data['FROM'].min()
+        end_depth_hole = hole_data['TO'].max()
+        
+        while start_depth < end_depth_hole:
+            end_depth_comp = start_depth + composite_length
+            
+            mask = (hole_data['FROM'] < end_depth_comp) & (hole_data['TO'] > start_depth)
+            interval_samples = hole_data[mask]
+            
+            if not interval_samples.empty:
+                comp_from = np.maximum(interval_samples['FROM'], start_depth)
+                comp_to = np.minimum(interval_samples['TO'], end_depth_comp)
+                comp_len = comp_to - comp_from
+                
+                total_len = np.sum(comp_len)
+                if total_len > 0.01:
+                    weighted_grade = np.sum(comp_len * interval_samples[element_col]) / total_len
+                    weighted_x = np.sum(comp_len * interval_samples['x']) / total_len
+                    weighted_y = np.sum(comp_len * interval_samples['y']) / total_len
+                    weighted_z = np.sum(comp_len * interval_samples['z']) / total_len
+
+                    all_composites.append({
+                        'HOLE_ID': dhid,
+                        'x': weighted_x,
+                        'y': weighted_y,
+                        'z': weighted_z,
+                        element_col: weighted_grade
+                    })
+
+            start_depth = end_depth_comp
+
+    composited_df = pd.DataFrame(all_composites)
+    return composited_df
+
+class GradeShellGenerator:
+    def __init__(self, element, use_log_transform, grid_resolution=50):
+        self.element = element
+        self.use_log_transform = use_log_transform
+        self.grid_resolution = grid_resolution
+        self.raw_data = None
+
+    def create_grade_grid(self, modeling_data, full_data_bounds):
+        points = modeling_data[['x', 'y', 'z']].values
+        values = modeling_data[self.element].values
+        
+        if self.use_log_transform:
+            values = np.log1p(values)
+
+        high_grade_cutoff = modeling_data[self.element].quantile(0.75)
+        high_grade_data = modeling_data[modeling_data[self.element] > high_grade_cutoff]
+        
+        if len(high_grade_data) < 3:
+            rotation_matrix = np.identity(3)
+            mean_coord = np.mean(points, axis=0)
+        else:
+            pca = PCA(n_components=3)
+            mean_coord = np.mean(high_grade_data[['x', 'y', 'z']].values, axis=0)
+            pca.fit(high_grade_data[['x', 'y', 'z']].values - mean_coord)
+            rotation_matrix = pca.components_
+
+        points_transformed = (points - mean_coord) @ rotation_matrix.T
+
+        min_coords = full_data_bounds[['x', 'y', 'z']].min()
+        max_coords = full_data_bounds[['x', 'y', 'z']].max()
+        
+        grid_x_coords, grid_y_coords, grid_z_coords = np.mgrid[
+            min_coords['x']:max_coords['x']:complex(0, self.grid_resolution), 
+            min_coords['y']:max_coords['y']:complex(0, self.grid_resolution), 
+            min_coords['z']:max_coords['z']:complex(0, self.grid_resolution)
+        ]
+        grid_points_flat = np.vstack([grid_x_coords.ravel(), grid_y_coords.ravel(), grid_z_coords.ravel()]).T
+        grid_transformed_flat = (grid_points_flat - mean_coord) @ rotation_matrix.T
+
+        predicted_values_flat = griddata(points_transformed, values, grid_transformed_flat, method='linear')
+        
+        predicted_grades = predicted_values_flat.reshape(grid_x_coords.shape)
+        predicted_grades = np.nan_to_num(predicted_grades, nan=0.0)
+
+        if self.use_log_transform:
+            min_log_val, max_log_val = np.min(values), np.max(values)
+            predicted_grades = np.clip(predicted_grades, min_log_val, max_log_val)
+            predicted_grades = np.expm1(predicted_grades)
+
+        return predicted_grades, grid_x_coords[:,0,0], grid_y_coords[0,:,0], grid_z_coords[0,0,:]
+
+    def visualize(self, predicted_grades, grid_x, grid_y, grid_z):
+        fig = go.Figure()
+
+        slider_min = self.raw_data[self.element].quantile(0.50)
+        slider_max = self.raw_data[self.element].quantile(0.99)
+        slider_cutoffs = np.linspace(slider_min, slider_max, 15)
+
+        for i, cutoff in enumerate(slider_cutoffs):
+            try:
+                verts, faces, _, _ = marching_cubes(
+                    volume=predicted_grades, 
+                    level=cutoff, 
+                    spacing=(grid_x[1]-grid_x[0], grid_y[1]-grid_y[0], grid_z[1]-grid_z[0])
+                )
+                verts += [grid_x[0], grid_y[0], grid_z[0]]
+                fig.add_trace(go.Mesh3d(x=verts[:, 0], y=verts[:, 1], z=verts[:, 2], i=faces[:, 0], j=faces[:, 1], k=faces[:, 2], opacity=0.3, color='cyan', name=f'Cutoff: {cutoff:.2f}', visible=(i == 0)))
+            except (ValueError, RuntimeError):
+                fig.add_trace(go.Mesh3d(visible=False))
+        
+        points = self.raw_data.sample(min(len(self.raw_data), 5000))
+        cmax_value = self.raw_data[self.element].quantile(0.98)
+        fig.add_trace(go.Scatter3d(x=points['x'], y=points['y'], z=points['z'], mode='markers', text=points[self.element], hovertemplate=(f'<b>{self.element} Grade: %{{text:.2f}}</b><br><br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}<br>Z: %{{z:.1f}}<extra></extra>'), marker=dict(size=2, color=points[self.element], colorscale='Viridis', colorbar=dict(title=f'{self.element} Grade'), showscale=True, cmin=0, cmax=cmax_value), name='Drill Samples'))
+        
+        grade_steps = []
+        for i in range(len(slider_cutoffs)):
+            visibility_mask = [False] * len(slider_cutoffs)
+            visibility_mask[i] = True
+            step = dict(method="update", args=[{"visible": visibility_mask + [True]}], label=f"{slider_cutoffs[i]:.2f}")
+            grade_steps.append(step)
+        
+        grade_slider = dict(
+            active=0, currentvalue={"prefix": "Cutoff Grade: "},
+            steps=grade_steps, y=0.1, x=0.1, len=0.8, pad={"t": 20, "b": 10}
+        )
+
+        opacity_steps = []
+        opacity_levels = np.linspace(0.1, 1.0, 10)
+        for op in opacity_levels:
+            step = dict(method="restyle", args=[{"opacity": op}], label=f"{op:.1f}")
+            opacity_steps.append(step)
+
+        opacity_slider = dict(
+            active=2, currentvalue={"prefix": "Opacity: "},
+            steps=opacity_steps, y=0, x=0.1, len=0.8, pad={"t": 20, "b": 10}
+        )
+
+        log_status = "Log-Transformed" if self.use_log_transform else "Standard"
+        # This layout call is now minimal - it only sets the title and sliders.
+        # Sizing and aspect ratio will be handled by the external function.
+        fig.update_layout(
+            title=f"Interactive Grade Shell ({log_status}) for {self.element}",
+            sliders=[opacity_slider, grade_slider]
+        )
+        
+        return fig
+    
+
 def create_drill_fence_cross_section(merged_df, viz_litho_df, collar_df, section_line_start, section_line_end, section_width, primary_element=None, use_log_scale=True, litho_dict=None):
     """
     Create a drill fence cross-section with lithology and grade on opposite sides of drill traces
@@ -2141,11 +2300,9 @@ def generate_summary_prompt(user_context=""):
 # =============================================================================
 # MAIN APP: TABS
 
-tab_data, tab_viz, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
-    "📁 Data Loading", "📏 3D Visualisations", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground", "💾 Export Data"
+tab_data, tab_viz, tab_gradeshell, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
+    "📁 Data Loading", "📏 3D Visualisations", "🩸 Grade Shell", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground",  "💾 Export Data"
 ])
-
-
 # =============================================================================
 # DATA LOADING TAB
 # =============================================================================
@@ -2336,8 +2493,81 @@ with tab_data:
     else:
         st.warning("Invalid data combination. Please check that you have uploaded the required files.")
 
+with tab_gradeshell:
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>⛏️ Grade Shell Generation</h2>", unsafe_allow_html=True)
+    st.markdown("This tool generates a 3D grade shell using anisotropic linear interpolation. Adjust the parameters and click the button to begin.")
 
+    if st.session_state.merged_df is not None and st.session_state.analysis_mode in ["collar_assay", "all"]:
+        st.subheader("Grade Shell Parameters")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            element_of_interest = st.selectbox("Select Element for Shell", st.session_state.element_cols, key="shell_element")
+            use_log_transform_shell = st.checkbox("Use Log Transform", value=True, key="shell_log")
+        with col2:
+            do_compositing_shell = st.checkbox("Composite Data for Modeling", value=True, key="shell_composite")
+            if do_compositing_shell:
+                composite_length_shell = st.number_input("Composite Length (m)", min_value=1.0, value=5.0, step=1.0, key="shell_comp_len")
+        with col3:
+            grid_resolution_shell = st.slider("Grid Resolution", min_value=10, max_value=100, value=30, step=5, key="shell_grid_res", help="Higher values increase detail but are much slower.")
         
+        # Add a vertical exaggeration slider for consistency
+        vertical_exaggeration_shell = st.slider(
+            "Vertical Exaggeration", 
+            min_value=1.0, 
+            max_value=10.0, 
+            value=1.0, 
+            step=0.1,
+            key="shell_exaggeration"
+        )
+
+        if st.button("Generate Grade Shell", type="primary"):
+            with st.spinner("Generating grade shell... This may take a few minutes."):
+                try:
+                    modeling_df = st.session_state.merged_df.copy()
+                    
+                    if do_compositing_shell:
+                        modeling_df = composite_for_shell(modeling_df, element_of_interest, composite_length_shell)
+
+                    if modeling_df.empty:
+                        st.error("No data available for modeling after preparation. Check compositing parameters.")
+                    else:
+                        shell_generator = GradeShellGenerator(
+                            element=element_of_interest,
+                            use_log_transform=use_log_transform_shell,
+                            grid_resolution=grid_resolution_shell
+                        )
+                        shell_generator.raw_data = modeling_df
+                        
+                        predicted_grades, grid_x, grid_y, grid_z = shell_generator.create_grade_grid(
+                            modeling_data=modeling_df,
+                            full_data_bounds=st.session_state.merged_df
+                        )
+                        
+                        fig_shell = shell_generator.visualize(predicted_grades, grid_x, grid_y, grid_z)
+                        
+                        # THIS IS THE KEY: Apply the same robust layout function used by the other tab
+                        update_figure_layout(fig_shell, vertical_exaggeration=vertical_exaggeration_shell)
+                        
+                        st.success("Grade shell generated successfully!")
+                        # The height parameter is now removed, as update_figure_layout handles it.
+                        st.plotly_chart(fig_shell, use_container_width=True)
+
+                        html_string, filename = create_html_download(fig_shell, f"gradeshell_{element_of_interest}")
+                        st.download_button(
+                            label="📥 Download Grade Shell (HTML)",
+                            data=html_string,
+                            file_name=filename,
+                            mime="text/html"
+                        )
+                except Exception as e:
+                    st.error(f"An error occurred during grade shell generation: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+    else:
+        st.warning("Please load collar and assay data in the 'Data Loading' tab first.")
+
+
 # =============================================================================
 # ML EXPLAIN (SHAP ANALYSIS) TAB
 # =============================================================================
