@@ -99,6 +99,10 @@ except:
     st.markdown('<div style="text-align: center; margin-bottom: 20px;">3DA</div>', unsafe_allow_html=True)
 
 st.markdown("<h1 style='text-align: center;'>Exploratory Data Analysis and Visualisation</h1>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='text-align: center; margin-bottom: 20px;'>For a full tutorial on this application, please read the <a href='https://tinyurl.com/geoinsights3d' target='_blank'>instructional blog post</a>.</div>",
+    unsafe_allow_html=True
+)
 # Add LLM API key input to sidebar
 with st.sidebar:
     st.markdown("<h3>LLM Integration</h3>", unsafe_allow_html=True)
