@@ -1123,27 +1123,33 @@ def add_collar_points(fig, collar_df, x_offset=0):
         customdata=collar_df['HOLE_ID']
     ))
 
-def update_figure_layout(fig, vertical_exaggeration=1.0):
+def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
     """Update figure layout with proper aspect ratios"""
     x_min, x_max = float('inf'), float('-inf')
     y_min, y_max = float('inf'), float('-inf')
     z_min, z_max = float('inf'), float('-inf')
 
     for trace in fig.data:
-        if hasattr(trace, 'x') and trace.x is not None:
+        if hasattr(trace, 'x') and trace.x is not None and len(trace.x) > 0:
             x_min = min(x_min, min(trace.x))
             x_max = max(x_max, max(trace.x))
-        if hasattr(trace, 'y') and trace.y is not None:
+        if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
             y_min = min(y_min, min(trace.y))
             y_max = max(y_max, max(trace.y))
-        if hasattr(trace, 'z') and trace.z is not None:
+        if hasattr(trace, 'z') and trace.z is not None and len(trace.z) > 0:
             z_min = min(z_min, min(trace.z))
             z_max = max(z_max, max(trace.z))
+
+    # Handle case where no data is plotted yet
+    if x_min == float('inf'): x_min, x_max = 0, 1
+    if y_min == float('inf'): y_min, y_max = 0, 1
+    if z_min == float('inf'): z_min, z_max = 0, 1
 
     x_diff = x_max - x_min
     y_diff = y_max - y_min
     z_diff = z_max - z_min
     max_diff = max(x_diff, y_diff, z_diff * vertical_exaggeration)
+    if max_diff == 0: max_diff = 1 # Avoid division by zero
 
     fig.update_layout(
         scene=dict(
@@ -1159,27 +1165,17 @@ def update_figure_layout(fig, vertical_exaggeration=1.0):
         ),
         width=1800,
         height=1200,
-        margin=dict(l=0, r=0, b=0, t=0),
-        uirevision="true",
+        margin=dict(l=0, r=0, b=0, t=40),
+        # The line 'uirevision="true"' has been REMOVED to allow legend toggling
         legend=dict(
             yanchor="top",
             y=0.9,
             xanchor="left",
-            x=1.15,
+            x=1.05, # Adjusted for better spacing
             bgcolor="rgba(255, 255, 255, 0.8)",
             bordercolor="rgba(0, 0, 0, 0.3)",
             borderwidth=1,
-            title="Lithology"
-        ),
-        legend2=dict(
-            yanchor="top",
-            y=1,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(255, 255, 255, 0.8)",
-            bordercolor="rgba(0, 0, 0, 0.3)",
-            borderwidth=1,
-            title="Clusters"
+            title=legend_title # Use the dynamic title
         )
     )
     fig.update_scenes(
@@ -1187,7 +1183,6 @@ def update_figure_layout(fig, vertical_exaggeration=1.0):
         yaxis_range=[y_min, y_max],
         zaxis_range=[z_min, z_max]
     )
-
 
 # =============================================================================
 # GRADE SHELL GENERATION FUNCTIONS
@@ -2375,8 +2370,8 @@ def generate_summary_prompt(user_context=""):
 # =============================================================================
 # MAIN APP: TABS
 
-tab_data, tab_viz, tab_gradeshell, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
-    "📁 Data Loading", "📏 3D Visualisations", "🩸 Grade Shell", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground",  "💾 Export Data"
+tab_data, tab_viz, tab_gradeshell, tab_solid_model, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
+    "📁 Data Loading", "📏 3D Visualisations", "🩸 Grade Shell", "🧊 3D Solid Model", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground",  "💾 Export Data"
 ])
 # =============================================================================
 # DATA LOADING TAB
@@ -2556,9 +2551,17 @@ with tab_data:
                 st.write(st.session_state.merged_df.head())
             else:
                 st.error("Failed to process or merge data. Please check your inputs and file contents.")
+
                 # Ensure session state reflects failure if merging fails
                 st.session_state.merged_df = None 
                 st.session_state.viz_litho_df = None
+            # --- Re-attach saved clusters after every data reload ---
+            if 'saved_cluster_labels' in st.session_state and st.session_state.merged_df is not None:
+                labels = st.session_state.saved_cluster_labels
+                # Use .reindex() to safely merge, aligning on the original index.
+                # .fillna(-1) handles any rows that might not have been clustered.
+                st.session_state.merged_df['Cluster'] = labels.reindex(st.session_state.merged_df.index).fillna(-1).astype(int)
+                st.session_state.viz_df['Cluster'] = labels.reindex(st.session_state.viz_df.index).fillna(-1).astype(int)
         else:
             # Collar processing failed
             st.error("Collar data processing failed. Cannot proceed.")
@@ -2653,6 +2656,207 @@ with tab_gradeshell:
     else:
         st.warning("Please load collar and assay data in the 'Data Loading' tab first.")
 
+
+with tab_solid_model:
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🧊 3D Solid Model Generation</h2>", unsafe_allow_html=True)
+    st.markdown("Generate 3D solids for categorical data like lithology or clusters using an anisotropic RBF interpolator.")
+
+    if st.session_state.merged_df is not None:
+        # --- UI for selection ---
+        source_options = []
+        if 'LITHO' in st.session_state.merged_df.columns:
+            source_options.append('Lithology')
+        if "Cluster" in st.session_state.merged_df.columns:
+            # Accept clusters option even if all are -1, like AI analysis does
+            source_options.append('Clusters')
+
+        if not source_options:
+            st.warning("No lithology or cluster data available for modeling. Please load the appropriate data or run clustering first.")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                model_source = st.selectbox("Select data source for solids", source_options, key="solid_model_source")
+                
+                unit_display_map = {}
+                if model_source == 'Lithology':
+                    column_name = 'LITHO'
+                    available_units = sorted(st.session_state.merged_df[column_name].dropna().unique())
+                    for unit in available_units:
+                        desc = st.session_state.litho_dict.get(unit, "") if st.session_state.litho_dict else ""
+                        unit_display_map[unit] = f"{unit} - {desc}" if desc else str(unit)
+                else:
+                    column_name = 'Cluster'
+                    available_units = sorted([c for c in st.session_state.merged_df[column_name].dropna().unique() if c >= 0])
+                    for unit in available_units:
+                        unit_display_map[unit] = f"Cluster {int(unit)}"
+
+                display_unit_map = {v: k for k, v in unit_display_map.items()}
+                
+                selected_display_names = st.multiselect(
+                    f"Select {model_source} units to model",
+                    options=list(unit_display_map.values()),
+                    default=list(unit_display_map.values())[:min(3, len(unit_display_map))]
+                )
+            
+            with col2:
+                grid_res_solid = st.slider("Grid Resolution", min_value=20, max_value=80, value=35, step=5, key="solid_grid_res", help="Higher values increase detail but are much slower.")
+                vert_exag_solid = st.slider("Vertical Exaggeration for View", min_value=1.0, max_value=10.0, value=1.0, step=0.1, key="solid_vert_exag")
+                surface_opacity = st.slider("Surface Opacity", min_value=0.1, max_value=1.0, value=0.5, step=0.1, key="solid_opacity")
+
+            st.info("💡 **Tip:** After generating the model, you can click on items in the legend on the right to toggle the visibility of each solid.")
+
+            if st.button("Generate 3D Solid Model", type="primary"):
+                if not selected_display_names:
+                    st.error("Please select at least one unit to model.")
+                else:
+                    selected_units = [display_unit_map[name] for name in selected_display_names]
+
+                    with st.spinner("Generating 3D solids... This can be slow for high resolution or many units."):
+                        try:
+                            model_df = st.session_state.merged_df[st.session_state.merged_df[column_name].isin(selected_units)].copy()
+                            model_df.dropna(subset=['x', 'y', 'z', column_name], inplace=True)
+
+                            if len(model_df) < 10:
+                                st.error("Not enough data points in the selected units to build a model.")
+                            else:
+                                fig_solid = go.Figure()
+                                colors = px.colors.qualitative.Plotly
+
+                                min_coords, max_coords = model_df[['x', 'y', 'z']].min(), model_df[['x', 'y', 'z']].max()
+                                ranges = max_coords - min_coords
+                                padding = ranges * 0.15
+                                expanded_min, expanded_max = min_coords - padding, max_coords + padding
+
+                                grid_x_coords, grid_y_coords, grid_z_coords = np.mgrid[
+                                    expanded_min['x']:expanded_max['x']:complex(0, grid_res_solid),
+                                    expanded_min['y']:expanded_max['y']:complex(0, grid_res_solid),
+                                    expanded_min['z']:expanded_max['z']:complex(0, grid_res_solid)
+                                ]
+                                grid_points_flat = np.vstack([grid_x_coords.ravel(), grid_y_coords.ravel(), grid_z_coords.ravel()]).T
+
+                                for i, unit in enumerate(selected_units):
+                                    st.write(f"--- Modeling unit: {unit_display_map[unit]} ({i+1}/{len(selected_units)}) ---")
+                                    
+                                    indicator_values = (model_df[column_name] == unit).astype(float)
+                                    points = model_df[['x', 'y', 'z']].values
+
+                                    if len(points) > 6000:
+                                        st.write(f"Subsampling {len(points)} points to 6000 for performance.")
+                                        sample_indices = np.random.choice(len(points), 6000, replace=False)
+                                        points, indicator_values = points[sample_indices], indicator_values.iloc[sample_indices]
+
+                                    unit_points = model_df[model_df[column_name] == unit][['x', 'y', 'z']].values
+                                    if len(unit_points) < 5:
+                                        st.warning(f"Unit '{unit_display_map[unit]}' has < 5 points. Using isotropic model for this unit.")
+                                        mean_coord, rotation_matrix, scaling_factors = np.mean(points, axis=0), np.identity(3), np.ones(3)
+                                    else:
+                                        pca = PCA(n_components=3)
+                                        mean_coord = np.mean(unit_points, axis=0)
+                                        pca.fit(unit_points - mean_coord)
+                                        rotation_matrix, explained_variance = pca.components_, pca.explained_variance_ratio_
+                                        scaling_factors = np.sqrt(explained_variance[0] / (explained_variance + 1e-6))
+                                        st.write(f"Anisotropy Ratios (1:Sec:Tert): 1.0 : {1/scaling_factors[1]:.2f} : {1/scaling_factors[2]:.2f}")
+
+                                    points_transformed = ((points - mean_coord) @ rotation_matrix.T) * scaling_factors
+                                    grid_transformed_flat = ((grid_points_flat - mean_coord) @ rotation_matrix.T) * scaling_factors
+
+                                    rbf = Rbf(points_transformed[:, 0], points_transformed[:, 1], points_transformed[:, 2], indicator_values.values, function='thin_plate', smooth=0.1)
+                                    predicted_indicator = rbf(grid_transformed_flat[:, 0], grid_transformed_flat[:, 1], grid_transformed_flat[:, 2]).reshape(grid_x_coords.shape)
+
+                                    try:
+                                        spacing = (grid_x_coords[1,0,0]-grid_x_coords[0,0,0], grid_y_coords[0,1,0]-grid_y_coords[0,0,0], grid_z_coords[0,0,1]-grid_z_coords[0,0,0])
+                                        verts, faces, _, _ = marching_cubes(predicted_indicator, level=0.5, spacing=spacing)
+                                        verts += [grid_x_coords[0,0,0], grid_y_coords[0,0,0], grid_z_coords[0,0,0]]
+
+                                        fig_solid.add_trace(go.Mesh3d(
+                                            x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                                            i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                                            color=colors[i % len(colors)],
+                                            opacity=surface_opacity,
+                                            flatshading=True,
+                                            name=unit_display_map[unit],
+                                            showlegend=True,
+                                            hoverinfo='name',
+                                            lighting=dict(
+                                                ambient=0.3,
+                                                diffuse=1,
+                                                specular=0.5,
+                                                roughness=0.5,
+                                                fresnel=0.2
+                                            ),
+                                            lightposition=dict(x=1000, y=1000, z=1000)
+                                        ))
+                                    except (ValueError, RuntimeError) as e:
+                                        st.warning(f"Could not generate a surface for unit '{unit_display_map[unit]}'. It might be too small or not form a coherent body. Error: {e}")
+
+                                # --- Plot colored and thicker drill traces (Correct Logic) ---
+                                st.write("Plotting colored drill traces...")
+
+                                # Create a color map for the selected units to ensure consistency
+                                unit_color_map = {unit: colors[i % len(colors)] for i, unit in enumerate(selected_units)}
+
+                                # A set to keep track of which legend groups we have already added
+                                legend_traces_added = set()
+
+                                # Loop through each HOLE to draw its full trace
+                                for hole_id, hole_data in model_df.groupby('HOLE_ID'):
+                                    # Sort the data for this hole by depth to ensure correct connections
+                                    hole_data = hole_data.sort_values('FROM')
+
+                                    # Iterate through the points in this hole to create colored segments
+                                    # We go to len(hole_data) - 1 because each segment needs a start and end point
+                                    for i in range(len(hole_data) - 1):
+                                        p1 = hole_data.iloc[i]      # Start point of the segment
+                                        p2 = hole_data.iloc[i+1]    # End point of the segment
+
+                                        # Determine the color and legend info from the START point (p1)
+                                        unit = p1[column_name]
+
+                                        # Only draw segments for units the user actually selected to model
+                                        if unit in selected_units:
+                                            color = unit_color_map.get(unit, 'grey') # Default to grey if not found
+                                            unit_name = unit_display_map.get(unit, str(unit))
+                                            legend_group = f"trace_{unit_name}"
+
+                                            # Check if we need to add this to the legend (only add once per category)
+                                            show_legend_for_trace = legend_group not in legend_traces_added
+                                            if show_legend_for_trace:
+                                                legend_traces_added.add(legend_group)
+
+                                            fig_solid.add_trace(go.Scatter3d(
+                                                x=[p1['x'], p2['x']],
+                                                y=[p1['y'], p2['y']],
+                                                z=[p1['z'], p2['z']],
+                                                mode='lines',
+                                                line=dict(
+                                                    color=color,
+                                                    width=8  # Increased thickness
+                                                ),
+                                                name=f"Trace: {unit_name}", # Name for hover and legend
+                                                legendgroup=legend_group,
+                                                showlegend=show_legend_for_trace,
+                                                hoverinfo='none' # Keep hover clean, solids have the info
+                                            ))
+                                # The invalid property is removed from this layout update
+                                update_figure_layout(fig_solid, vertical_exaggeration=vert_exag_solid)
+                                fig_solid.update_layout(
+                                    title=f"3D Solid Model - Source: {model_source}",
+                                    legend_title=model_source
+                                )
+                                
+                                st.success("Model generation complete!")
+                                st.plotly_chart(fig_solid, use_container_width=True)
+
+                                html_string, filename = create_html_download(fig_solid, f"solid_model_{model_source}")
+                                st.download_button(label="📥 Download Solid Model (HTML)", data=html_string, file_name=filename, mime="text/html")
+                        except Exception as e:
+                            st.error(f"An unexpected error occurred during model generation: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
+    else:
+        st.warning("Please load data in the 'Data Loading' tab first.")
+
+
 # =============================================================================
 # ML EXPLAIN (SHAP ANALYSIS) TAB
 # =============================================================================
@@ -2682,9 +2886,14 @@ with tab_ml_explain:
         
         if subset_option == "Specific Cluster":
             if "Cluster" in shap_df.columns:
-                clusters = sorted(shap_df["Cluster"].astype(str).unique())
-                selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
-                shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
+                # Filter out invalid clusters (-1)
+                valid_clusters = [c for c in shap_df["Cluster"].unique() if c >= 0]
+                if valid_clusters:
+                    clusters = sorted([str(c) for c in valid_clusters])
+                    selected_clusters = st.multiselect("Select clusters", clusters, default=clusters)
+                    shap_df = shap_df[shap_df["Cluster"].astype(str).isin(selected_clusters)]
+                else:
+                    st.warning("No valid clusters found (all samples are unassigned). Running SHAP on all data.")
             else:
                 st.warning("No clustering data available. Running SHAP on all data.")
         elif subset_option == "Specific Lithology":
@@ -3232,21 +3441,24 @@ with tab_clustering:
                 state.n_clusters = st.number_input("Select number of clusters", min_value=2, max_value=max_clusters, value=state.n_clusters)
                 kmeans = KMeans(n_clusters=state.n_clusters, random_state=42, n_init=10)
                 cluster_labels = kmeans.fit_predict(state.X_scaled)
+                st.session_state.saved_cluster_labels = pd.Series(cluster_labels, index=cluster_df.index)
+                # Assign clusters directly to the rows that were clustered
                 cluster_df['Cluster'] = cluster_labels
-                cluster_mapping = dict(zip(
-                    zip(cluster_df['HOLE_ID'], cluster_df['FROM'], cluster_df['TO']),
-                    cluster_df['Cluster']
-                ))
-                st.session_state.merged_df['Cluster'] = [
-                    cluster_mapping.get((hole, from_val, to_val), -1)
-                    for hole, from_val, to_val in zip(st.session_state.merged_df['HOLE_ID'], st.session_state.merged_df['FROM'], st.session_state.merged_df['TO'])
-                ]
-                st.session_state.viz_df['Cluster'] = [
-                    cluster_mapping.get((hole, from_val, to_val), -1)
-                    for hole, from_val, to_val in zip(st.session_state.viz_df['HOLE_ID'], st.session_state.viz_df['FROM'], st.session_state.viz_df['TO'])
-                ]
-                st.session_state.merged_df = st.session_state.merged_df[st.session_state.merged_df['Cluster'] >= 0]
-                st.session_state.viz_df = st.session_state.viz_df[st.session_state.viz_df['Cluster'] >= 0]
+
+                # Initialize all rows in merged_df to -1
+# -----------------------------------------------------------------
+                # 1.  Give every row the default label -1
+                st.session_state.merged_df['Cluster'] = -1
+                st.session_state.viz_df  ['Cluster'] = -1
+
+                # 2.  Push the K-means labels back into the rows that were clustered
+                #     (cluster_df is a straight copy of merged_df *before* clustering,
+                #      so they still share the same index.)
+                st.session_state.merged_df.loc[cluster_df.index, 'Cluster'] = cluster_labels
+                st.session_state.viz_df  .loc[cluster_df.index, 'Cluster'] = cluster_labels
+                # -----------------------------------------------------------------
+
+                st.session_state.clustering_completed = True
                 if not use_pca:
                     if use_log_transform:
                         cluster_centers = pd.DataFrame(
@@ -3256,7 +3468,7 @@ with tab_clustering:
                     else:
                         cluster_centers = pd.DataFrame(
                             state.scaler.inverse_transform(kmeans.cluster_centers_),
-                            columns=cluster_features
+                            columns=state.selected_cluster_features
                         )
                     st.write("Cluster Centers:")
                     st.write(cluster_centers)
@@ -3508,27 +3720,29 @@ with tab_clustering:
             else:
                 st.warning("No cluster data available. Please run clustering analysis first.")
         elif state.X_scaled is not None:
+            cluster_df = st.session_state.merged_df.copy() 
             st.subheader("Clustering Scree Plot")
             st.plotly_chart(plot_scree(wcss=state.wcss, is_pca=False))
             state.n_clusters = st.number_input("Select number of clusters", min_value=2, max_value=max_clusters, value=state.n_clusters)
             kmeans = KMeans(n_clusters=state.n_clusters, random_state=42, n_init=10)
             cluster_labels = kmeans.fit_predict(state.X_scaled)
-            cluster_df = st.session_state.merged_df.copy()
-            cluster_df['Cluster'] = cluster_labels
-            cluster_mapping = dict(zip(
-                zip(cluster_df['HOLE_ID'], cluster_df['FROM'], cluster_df['TO']),
-                cluster_df['Cluster']
-            ))
-            st.session_state.merged_df['Cluster'] = [
-                cluster_mapping.get((hole, from_val, to_val), -1)
-                for hole, from_val, to_val in zip(st.session_state.merged_df['HOLE_ID'], st.session_state.merged_df['FROM'], st.session_state.merged_df['TO'])
-            ]
-            st.session_state.viz_df['Cluster'] = [
-                cluster_mapping.get((hole, from_val, to_val), -1)
-                for hole, from_val, to_val in zip(st.session_state.viz_df['HOLE_ID'], st.session_state.viz_df['FROM'], st.session_state.viz_df['TO'])
-            ]
-            st.session_state.merged_df = st.session_state.merged_df[st.session_state.merged_df['Cluster'] >= 0]
-            st.session_state.viz_df = st.session_state.viz_df[st.session_state.viz_df['Cluster'] >= 0]
+            st.session_state.saved_cluster_labels = pd.Series(cluster_labels, index=cluster_df.index) 
+            
+
+            # Initialise all rows in merged_df to -1
+            # -----------------------------------------------------------------
+            # 1.  Give every row the default label -1
+            st.session_state.merged_df['Cluster'] = -1
+            st.session_state.viz_df  ['Cluster'] = -1
+
+            # 2.  Push the K-means labels back into the rows that were clustered
+            #     (cluster_df is a straight copy of merged_df *before* clustering,
+            #      so they still share the same index.)
+            st.session_state.merged_df.loc[cluster_df.index, 'Cluster'] = cluster_labels
+            st.session_state.viz_df  .loc[cluster_df.index, 'Cluster'] = cluster_labels
+            # -----------------------------------------------------------------
+
+            st.session_state.clustering_completed = True
             if not use_pca:
                 if use_log_transform:
                     cluster_centers = pd.DataFrame(
@@ -3538,7 +3752,7 @@ with tab_clustering:
                 else:
                     cluster_centers = pd.DataFrame(
                         state.scaler.inverse_transform(kmeans.cluster_centers_),
-                        columns=cluster_features
+                        columns=state.selected_cluster_features
                     )
                 st.write("Cluster Centers:")
                 st.write(cluster_centers)
