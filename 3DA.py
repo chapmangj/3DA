@@ -1077,7 +1077,7 @@ def add_collar_points(fig, collar_df, x_offset=0):
 
 def create_combined_3d_visualisation(df, collar_df, viz_litho_df, litho_dict, selected_viz, primary_element, use_log_scale, vertical_exaggeration, legend_title="Legend", use_log_scale_anomaly=True):
     """
-    Creates a combined 3D visualisation with optional grade, lithology, cluster, and anomaly score views.
+    Creates a combined isation with optional grade, lithology, cluster, and anomaly score views.
     Now includes a separate log scale control for anomaly scores.
     """
     fig = go.Figure()
@@ -2082,7 +2082,7 @@ def calculate_significant_intervals(df, element, cutoff, min_length, max_interna
     return pd.DataFrame(results)
 
 def create_cluster_visualisation(merged_df, viz_df, collar_df, primary_element, use_log_scale, vertical_exaggeration=1.0):
-    """Create 3D visualisation of clusters with the same options as in the visuals tab"""
+    """Create isation of clusters with the same options as in the visuals tab"""
     fig = go.Figure()
     if 'Cluster' in viz_df.columns:
         for cluster in sorted(viz_df['Cluster'].unique()):
@@ -2463,7 +2463,7 @@ def generate_summary_prompt(user_context=""):
 # MAIN APP: TABS
 
 tab_data, tab_viz, tab_gradeshell, tab_solid_model, tab_stats, tab_clustering, tab_ml_explain, tab_anomaly, tab_llm, tab_qa, tab_download = st.tabs([
-    "📁 Data Loading", "📏 3D Visualisations", "🩸 Grade Shell", "🧊 3D Solid Model", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🔎 Anomoly Detection", "🤖 AI GEO", "📋 Data Analysis Playground",  "💾 Export Data"
+    "📁 Data Loading", "📏 3D Visualisations ans Cross-Sections", "🩸 Grade Shells", "🧊 3D Solid Model", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🔎 Anomoly Detection", "🤖 AI GEO", "📋 Data Analysis Playground",  "💾 Export Data"
 ])
 
 
