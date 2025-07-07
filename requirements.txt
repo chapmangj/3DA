@@ -8,4 +8,4 @@ Pillow
 matplotlib
 SHAP
 scikit-image
-tensorflow
+tensorflow==2.17.0
