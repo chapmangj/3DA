@@ -1311,7 +1311,7 @@ def composite_for_shell(df, element_col, composite_length):
     return composited_df
 
 class GradeShellGenerator:
-    def __init__(self, element, use_log_transform, grid_resolution=50, model_type='anisotropic'):
+    def __init__(self, element, use_log_transform, grid_resolution=30, model_type='anisotropic'):
         self.element = element
         self.use_log_transform = use_log_transform
         self.grid_resolution = grid_resolution
@@ -1324,7 +1324,7 @@ class GradeShellGenerator:
             'anisotropic': 'Anisotropic RBF (Rotation + Scaling)'
         }
         self.method_name = method_map.get(self.model_type, 'Unknown Method')
-        st.info(f"Initialized model with method: {self.method_name} ({log_status})")
+        st.info(f"Initialised model with method: {self.method_name} ({log_status})")
 
     def create_grade_grid(self, modeling_data, full_data_bounds):
         st.write(f"--- Starting grade grid creation with method: {self.method_name} ---")
@@ -1799,7 +1799,7 @@ def create_drill_fence_cross_section(merged_df, viz_litho_df, collar_df, section
             bordercolor="rgba(0, 0, 0, 0.3)",
             borderwidth=1
         ),
-        margin=dict(r=300, l=50, t=80, b=50)  # Increased right margin to 300
+        margin=dict(r=300, l=50, t=80, b=50)  
     )
     
 
@@ -2609,7 +2609,7 @@ with tab_gradeshell:
             use_log_transform_shell = st.checkbox("Use Log Transform", value=True, key="shell_log")
             do_compositing_shell = st.checkbox("Composite Data for Modeling", value=True, key="shell_composite")
             if do_compositing_shell:
-                composite_length_shell = st.number_input("Composite Length (m)", min_value=1.0, value=5.0, step=1.0, key="shell_comp_len")
+                composite_length_shell = st.number_input("Composite Length (m)", min_value=1.0, value=4.0, step=1.0, key="shell_comp_len")
         with col3:
             grid_resolution_shell = st.slider("Grid Resolution", min_value=20, max_value=100, value=50, step=5, key="shell_grid_res", help="Higher values increase detail but are much slower.")
             vertical_exaggeration_shell = st.slider(
@@ -2682,7 +2682,7 @@ with tab_anomaly:
     The resulting Anomaly Score measures how poorly the model could reconstruct a sample. A high score indicates a strong anomaly.
     """)
 
-    # Initialize state variables
+    # Initialise state variables
     if 'anomaly_analysis_complete' not in st.session_state:
         st.session_state.anomaly_analysis_complete = False
     if 'autoencoder_model' not in st.session_state:
@@ -4007,7 +4007,7 @@ with tab_llm:
                             
                             # Get LLM response
                             model_for_followup = st.session_state.get('google_model')
-                            response = None # Initialize response
+                            response = None # Initialise response
 
                             if not model_for_followup:
                                 st.error("Please ensure a Google AI Model name is entered in the sidebar for follow-up questions.")
