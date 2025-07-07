@@ -2611,7 +2611,7 @@ with tab_gradeshell:
             if do_compositing_shell:
                 composite_length_shell = st.number_input("Composite Length (m)", min_value=1.0, value=4.0, step=1.0, key="shell_comp_len")
         with col3:
-            grid_resolution_shell = st.slider("Grid Resolution", min_value=20, max_value=100, value=50, step=5, key="shell_grid_res", help="Higher values increase detail but are much slower.")
+            grid_resolution_shell = st.slider("Grid Resolution", min_value=20, max_value=100, value=30, step=5, key="shell_grid_res", help="Higher values increase detail but are much slower.")
             vertical_exaggeration_shell = st.slider(
                 "Vertical Exaggeration", 
                 min_value=1.0, 
@@ -2964,7 +2964,7 @@ with tab_solid_model:
                 )
             
             with col2:
-                grid_res_solid = st.slider("Grid Resolution", min_value=20, max_value=80, value=35, step=5, key="solid_grid_res", help="Higher values increase detail but are much slower.")
+                grid_res_solid = st.slider("Grid Resolution", min_value=20, max_value=80, value=30, step=5, key="solid_grid_res", help="Higher values increase detail but are much slower.")
                 vert_exag_solid = st.slider("Vertical Exaggeration for View", min_value=1.0, max_value=10.0, value=1.0, step=0.1, key="solid_vert_exag")
                 surface_opacity = st.slider("Surface Opacity", min_value=0.1, max_value=1.0, value=0.5, step=0.1, key="solid_opacity")
 
