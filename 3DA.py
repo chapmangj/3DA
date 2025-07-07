@@ -938,107 +938,49 @@ def create_lithology_analysis(merged_df, primary_element, use_log_scale, litho_d
     else:
         st.warning("No data available for plotting after applying filters.")
 
-def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mode, color_by='grade', x_offset=0, colorbar_x_pos=0.95):
-    """Add grade or cluster visualisation to the figure"""
-    valid_samples = viz_df
-    if color_by == 'cluster':
-        color_values = valid_samples['Cluster']
-        color_bar_title = 'Cluster'
-        custom_colorscale = px.colors.qualitative.G10
+def add_grade_visualisation(fig, df, element, use_log_scale, viz_mode, color_by, x_offset=0, colorbar_x=1.02):
+    """
+    Adds grade visualisation to a 3D plot.
+    Accepts a colorbar_x parameter to control the legend position.
+    """
+    df_vis = df.copy()
+    
+    if use_log_scale and df_vis[element].min() > 0:
+        df_vis[element] = np.log10(df_vis[element])
+        colorbar_title = f"Log10({element})"
     else:
-        if use_log_scale:
-            valid_samples = valid_samples[valid_samples[primary_element] > 0]
-            color_values = valid_samples[primary_element]
-            color_bar_title = primary_element
-            min_val = valid_samples[primary_element].min()
-            max_val = valid_samples[primary_element].max()
-            log_min = np.floor(np.log10(min_val))
-            log_max = np.ceil(np.log10(max_val))
-            tick_vals = []
-            tick_text = []
-            def format_number(x):
-                if x >= 1:
-                    return f'{x:.0f}'
-                elif x >= 0.1:
-                    return f'{x:.2f}'
-                elif x >= 0.01:
-                    return f'{x:.3f}'
-                else:
-                    return f'{x:.4f}'
-            tick_vals.append(min_val)
-            tick_text.append(format_number(min_val))
-            for i in range(int(log_min), int(log_max) + 1):
-                current = 10**i
-                if min_val <= current <= max_val:
-                    if current not in tick_vals:
-                        tick_vals.append(current)
-                        tick_text.append(format_number(current))
-                if 10 * current <= max_val and 10 * current >= min_val:
-                    if (10 * current) not in tick_vals:
-                        tick_vals.append(10 * current)
-                        tick_text.append(format_number(10 * current))
-            if max_val not in tick_vals:
-                tick_vals.append(max_val)
-                tick_text.append(format_number(max_val))
-            tick_vals, tick_text = zip(*sorted(zip(tick_vals, tick_text)))
-            tick_vals = list(tick_vals)
-            tick_text = list(tick_text)
-        else:
-            color_values = valid_samples[primary_element]
-            color_bar_title = primary_element
-            min_val = valid_samples[primary_element].min()
-            max_val = valid_samples[primary_element].max()
-            tick_vals = np.linspace(min_val, max_val, 6)
-            tick_text = [f'{v:.3f}' for v in tick_vals]
-        custom_colorscale = 'rdylbu'
+        colorbar_title = element
 
-    hover_text = []
-    for _, row in valid_samples.iterrows():
-        hover_info = [
-            f"<b>Hole ID:</b> {row['HOLE_ID']}",
-            f"<b>{primary_element}:</b> {row[primary_element]:.2f}",
-            f"<b>From:</b> {row['FROM']:.2f}",
-            f"<b>To:</b> {row['TO']:.2f}"
-        ]
-        if 'LITHO' in valid_samples.columns:
-            hover_info.append(f"<b>Lithology:</b> {row['LITHO']}")
-        if 'Cluster' in valid_samples.columns:
-            hover_info.append(f"<b>Cluster:</b> {row['Cluster']}")
-        hover_text.append("<br>".join(hover_info))
+    hover_text = [
+        f"<b>Hole ID:</b> {row['HOLE_ID']}<br>" +
+        f"<b>{element}:</b> {row[element]:.4f}<br>" +
+        f"<b>From:</b> {row['FROM']:.2f}m<br>" +
+        f"<b>To:</b> {row['TO']:.2f}m"
+        for _, row in df.iterrows()
+    ]
 
     fig.add_trace(go.Scatter3d(
-        x=valid_samples['x'] + x_offset,
-        y=valid_samples['y'],
-        z=valid_samples['z'],
+        x=df_vis['x'] + x_offset, 
+        y=df_vis['y'], 
+        z=df_vis['z'],
         mode='markers',
         marker=dict(
             size=8,
-            color=color_values,
-            colorscale=custom_colorscale,
-            reversescale=True if color_by != 'cluster' else False,
-            showscale=True,
-            symbol='square',
+            color=df_vis[element],
+            colorscale='viridis',
             colorbar=dict(
-                title=color_bar_title,
-                len=0.75,
-                ticks='outside',
-                ticklen=5,
-                x=colorbar_x_pos,  # THIS IS THE MODIFIED LINE
-                tickmode='array',
-                tickvals=tick_vals,
-                ticktext=tick_text
+                title=colorbar_title,
+                x=colorbar_x,  # Use the new parameter here
+                len=0.7,
+                yanchor='middle',
+                y=0.5
             ),
-            cmin=min_val,
-            cmax=max_val,
-            cauto=False
+            showscale=True
         ),
-        hovertemplate="%{text}<br>" +
-                      "<b>X:</b> %{x:.2f}<br>" +
-                      "<b>Y:</b> %{y:.2f}<br>" +
-                      "<b>Z:</b> %{z:.2f}<extra></extra>",
+        name=element,
         text=hover_text,
-        name='Samples',
-        showlegend=False
+        hovertemplate="%{text}<extra></extra>",
+        visible=True if viz_mode == "Combined" else 'legendonly' if viz_mode == "Separate" else True
     ))
 
 
@@ -1133,29 +1075,28 @@ def add_collar_points(fig, collar_df, x_offset=0):
     ))
 
 
-def create_combined_3d_visualisation(df, collar_df, viz_litho_df, litho_dict, selected_viz, primary_element, use_log_scale, vertical_exaggeration, legend_title="Legend"):
+def create_combined_3d_visualisation(df, collar_df, viz_litho_df, litho_dict, selected_viz, primary_element, use_log_scale, vertical_exaggeration, legend_title="Legend", use_log_scale_anomaly=True):
     """
     Creates a combined 3D visualisation with optional grade, lithology, cluster, and anomaly score views.
-    This function is designed to be reusable across different tabs.
+    Now includes a separate log scale control for anomaly scores.
     """
     fig = go.Figure()
-    offsets = {"Anomaly Score": 0, "Grade": 20, "Clusters": -20, "Lithology": -40}
+    offsets = {"Anomaly Score": 0, "Grade": 10, "Clusters": -10, "Lithology": 20}
 
-    # --- Internal Filtering for Robustness ---
-    # Ensure all dataframes used for plotting are consistent with the main 'df'
     active_holes = df['HOLE_ID'].unique()
     filtered_collar_df = collar_df[collar_df['HOLE_ID'].isin(active_holes)]
     filtered_litho_df = viz_litho_df[viz_litho_df['HOLE_ID'].isin(active_holes)] if viz_litho_df is not None else None
     
-    # --- Add Main Visualisations ---
     for viz_type in selected_viz:
         offset = offsets.get(viz_type, 0)
         
         if viz_type == "Grade" and primary_element and not df.empty:
-            add_grade_visualisation(fig, df, primary_element, use_log_scale, "Combined", color_by='grade', x_offset=offset)
+            add_grade_visualisation(fig, df, primary_element, use_log_scale, "Combined", color_by='grade', x_offset=offset, colorbar_x=1.1)
         
+        # --- THIS IS THE MODIFIED PART ---
         elif viz_type == "Anomaly Score" and 'Anomaly_Score' in df.columns:
-            add_grade_visualisation(fig, df, 'Anomaly_Score', use_log_scale=True, viz_mode="Combined", color_by='grade', x_offset=offset)
+            # Use the new parameter instead of hardcoding to True
+            add_grade_visualisation(fig, df, 'Anomaly_Score', use_log_scale=use_log_scale_anomaly, viz_mode="Combined", color_by='grade', x_offset=offset, colorbar_x=0.99)
             
         elif viz_type == "Lithology" and filtered_litho_df is not None and not filtered_litho_df.empty:
             add_lithology_visualisation(fig, filtered_litho_df, "Combined", None, litho_dict, x_offset=offset)
@@ -1165,31 +1106,16 @@ def create_combined_3d_visualisation(df, collar_df, viz_litho_df, litho_dict, se
             if not cluster_viz_df.empty:
                 for cluster in sorted(cluster_viz_df['Cluster'].unique()):
                     cluster_data = cluster_viz_df[cluster_viz_df['Cluster'] == cluster]
-                    
-                    hover_text = [
-                        f"<b>Hole ID:</b> {row['HOLE_ID']}<br>" +
-                        f"<b>Cluster:</b> {cluster}<br>" +
-                        f"<b>From:</b> {row['FROM']:.2f}m<br>" +
-                        f"<b>To:</b> {row['TO']:.2f}m"
-                        for _, row in cluster_data.iterrows()
-                    ]
-                    
+                    hover_text = [f"<b>Hole ID:</b> {row['HOLE_ID']}<br><b>Cluster:</b> {cluster}<br><b>From:</b> {row['FROM']:.2f}m<br><b>To:</b> {row['TO']:.2f}m" for _, row in cluster_data.iterrows()]
                     fig.add_trace(go.Scatter3d(
-                        x=cluster_data['x'] + offset, 
-                        y=cluster_data['y'], 
-                        z=cluster_data['z'], 
-                        mode='markers', 
+                        x=cluster_data['x'] + offset, y=cluster_data['y'], z=cluster_data['z'], mode='markers', 
                         marker=dict(size=8, color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)]), 
-                        name=f'Cluster {cluster}', 
-                        text=hover_text, 
-                        hovertemplate="%{text}<extra></extra>"
+                        name=f'Cluster {cluster}', text=hover_text, hovertemplate="%{text}<extra></extra>"
                     ))
 
-    # --- Add Drill Traces and Collars for each offset view ---
     required_offsets = {offsets[viz] for viz in selected_viz if viz in offsets}
     for offset in required_offsets:
         if not df.empty:
-            # Use the internally filtered collar dataframe
             for hole in active_holes:
                 hole_data = df[df['HOLE_ID'] == hole]
                 collar_point = filtered_collar_df[filtered_collar_df['HOLE_ID'] == hole]
@@ -1206,7 +1132,9 @@ def create_combined_3d_visualisation(df, collar_df, viz_litho_df, litho_dict, se
     update_figure_layout(fig, vertical_exaggeration, legend_title)
     return fig
 
+    
 def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
+    
     """Update figure layout with proper aspect ratios"""
     x_min, x_max = float('inf'), float('-inf')
     y_min, y_max = float('inf'), float('-inf')
@@ -2965,8 +2893,13 @@ with tab_anomaly:
                 with col2:
                     use_log_scale_for_grade = st.checkbox("Use log scale for grade", value=True, key="anomaly_grade_log")
             
-            vertical_exaggeration_anomaly = st.slider("Vertical Exaggeration", 1.0, 10.0, 1.0, 0.1, key="anomaly_3d_exag")
             
+            col1_viz, col2_viz = st.columns(2)
+            with col1_viz:
+                vertical_exaggeration_anomaly = st.slider("Vertical Exaggeration", 1.0, 10.0, 1.0, 0.1, key="anomaly_3d_exag")
+            with col2_viz:
+                use_log_scale_for_anomaly = st.checkbox("Use log scale for Anomaly Score", value=True, key="anomaly_score_log")
+
             fig_3d_anomaly = create_combined_3d_visualisation(
                 df=df_display,
                 collar_df=st.session_state.collar_df,
@@ -2975,6 +2908,8 @@ with tab_anomaly:
                 selected_viz=selected_viz_anomaly,
                 primary_element=primary_element_for_viz,
                 use_log_scale=use_log_scale_for_grade,
+                # Pass the new checkbox value to the function
+                use_log_scale_anomaly=use_log_scale_for_anomaly,
                 vertical_exaggeration=vertical_exaggeration_anomaly,
                 legend_title="Anomaly Plot"
             )
