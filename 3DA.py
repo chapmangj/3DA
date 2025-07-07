@@ -19,6 +19,9 @@ import os
 import matplotlib.pyplot as plt
 from io import BytesIO
 import base64
+import tensorflow as tf
+from tensorflow import keras
+from sklearn.preprocessing import MinMaxScaler
 
 
 def create_html_download(fig, filename_prefix):
@@ -65,6 +68,11 @@ if 'significant_intervals' not in st.session_state:
     st.session_state.significant_intervals = None
 if 'google_api_key' not in st.session_state:
     st.session_state.google_api_key = None
+if 'viz_litho_df' not in st.session_state:
+    st.session_state.viz_litho_df = None
+if 'litho_dict' not in st.session_state:
+    st.session_state.litho_dict = {}
+
 
 
 
@@ -930,7 +938,7 @@ def create_lithology_analysis(merged_df, primary_element, use_log_scale, litho_d
     else:
         st.warning("No data available for plotting after applying filters.")
 
-def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mode, color_by='grade', x_offset=0):
+def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mode, color_by='grade', x_offset=0, colorbar_x_pos=0.95):
     """Add grade or cluster visualisation to the figure"""
     valid_samples = viz_df
     if color_by == 'cluster':
@@ -1015,7 +1023,7 @@ def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mod
                 len=0.75,
                 ticks='outside',
                 ticklen=5,
-                x=0.95,
+                x=colorbar_x_pos,  # THIS IS THE MODIFIED LINE
                 tickmode='array',
                 tickvals=tick_vals,
                 ticktext=tick_text
@@ -1032,6 +1040,7 @@ def add_grade_visualisation(fig, viz_df, primary_element, use_log_scale, viz_mod
         name='Samples',
         showlegend=False
     ))
+
 
 def add_lithology_visualisation(fig, viz_litho_df, viz_mode, selected_lithos=None, litho_dict=None, x_offset=0):
     """Add lithology visualisation to the figure as intervals"""
@@ -1123,6 +1132,80 @@ def add_collar_points(fig, collar_df, x_offset=0):
         customdata=collar_df['HOLE_ID']
     ))
 
+
+def create_combined_3d_visualisation(df, collar_df, viz_litho_df, litho_dict, selected_viz, primary_element, use_log_scale, vertical_exaggeration, legend_title="Legend"):
+    """
+    Creates a combined 3D visualisation with optional grade, lithology, cluster, and anomaly score views.
+    This function is designed to be reusable across different tabs.
+    """
+    fig = go.Figure()
+    offsets = {"Anomaly Score": 0, "Grade": 20, "Clusters": -20, "Lithology": -40}
+
+    # --- Internal Filtering for Robustness ---
+    # Ensure all dataframes used for plotting are consistent with the main 'df'
+    active_holes = df['HOLE_ID'].unique()
+    filtered_collar_df = collar_df[collar_df['HOLE_ID'].isin(active_holes)]
+    filtered_litho_df = viz_litho_df[viz_litho_df['HOLE_ID'].isin(active_holes)] if viz_litho_df is not None else None
+    
+    # --- Add Main Visualisations ---
+    for viz_type in selected_viz:
+        offset = offsets.get(viz_type, 0)
+        
+        if viz_type == "Grade" and primary_element and not df.empty:
+            add_grade_visualisation(fig, df, primary_element, use_log_scale, "Combined", color_by='grade', x_offset=offset)
+        
+        elif viz_type == "Anomaly Score" and 'Anomaly_Score' in df.columns:
+            add_grade_visualisation(fig, df, 'Anomaly_Score', use_log_scale=True, viz_mode="Combined", color_by='grade', x_offset=offset)
+            
+        elif viz_type == "Lithology" and filtered_litho_df is not None and not filtered_litho_df.empty:
+            add_lithology_visualisation(fig, filtered_litho_df, "Combined", None, litho_dict, x_offset=offset)
+            
+        elif viz_type == "Clusters" and 'Cluster' in df.columns:
+            cluster_viz_df = df[df['Cluster'] >= 0].copy()
+            if not cluster_viz_df.empty:
+                for cluster in sorted(cluster_viz_df['Cluster'].unique()):
+                    cluster_data = cluster_viz_df[cluster_viz_df['Cluster'] == cluster]
+                    
+                    hover_text = [
+                        f"<b>Hole ID:</b> {row['HOLE_ID']}<br>" +
+                        f"<b>Cluster:</b> {cluster}<br>" +
+                        f"<b>From:</b> {row['FROM']:.2f}m<br>" +
+                        f"<b>To:</b> {row['TO']:.2f}m"
+                        for _, row in cluster_data.iterrows()
+                    ]
+                    
+                    fig.add_trace(go.Scatter3d(
+                        x=cluster_data['x'] + offset, 
+                        y=cluster_data['y'], 
+                        z=cluster_data['z'], 
+                        mode='markers', 
+                        marker=dict(size=8, color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)]), 
+                        name=f'Cluster {cluster}', 
+                        text=hover_text, 
+                        hovertemplate="%{text}<extra></extra>"
+                    ))
+
+    # --- Add Drill Traces and Collars for each offset view ---
+    required_offsets = {offsets[viz] for viz in selected_viz if viz in offsets}
+    for offset in required_offsets:
+        if not df.empty:
+            # Use the internally filtered collar dataframe
+            for hole in active_holes:
+                hole_data = df[df['HOLE_ID'] == hole]
+                collar_point = filtered_collar_df[filtered_collar_df['HOLE_ID'] == hole]
+                if not collar_point.empty:
+                    collar_point = collar_point.iloc[0]
+                    x_line = [collar_point['EASTING'] + offset] + (hole_data['x'] + offset).tolist()
+                    y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
+                    z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
+                    fig.add_trace(go.Scatter3d(x=x_line, y=y_line, z=z_line, mode='lines', line=dict(color='gray', width=1), showlegend=False))
+            
+            if not filtered_collar_df.empty:
+                add_collar_points(fig, filtered_collar_df, x_offset=offset)
+
+    update_figure_layout(fig, vertical_exaggeration, legend_title)
+    return fig
+
 def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
     """Update figure layout with proper aspect ratios"""
     x_min, x_max = float('inf'), float('-inf')
@@ -1140,7 +1223,6 @@ def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
             z_min = min(z_min, min(trace.z))
             z_max = max(z_max, max(trace.z))
 
-    # Handle case where no data is plotted yet
     if x_min == float('inf'): x_min, x_max = 0, 1
     if y_min == float('inf'): y_min, y_max = 0, 1
     if z_min == float('inf'): z_min, z_max = 0, 1
@@ -1149,7 +1231,7 @@ def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
     y_diff = y_max - y_min
     z_diff = z_max - z_min
     max_diff = max(x_diff, y_diff, z_diff * vertical_exaggeration)
-    if max_diff == 0: max_diff = 1 # Avoid division by zero
+    if max_diff == 0: max_diff = 1
 
     fig.update_layout(
         scene=dict(
@@ -1165,17 +1247,18 @@ def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
         ),
         width=1800,
         height=1200,
-        margin=dict(l=0, r=0, b=0, t=40),
-        # The line 'uirevision="true"' has been REMOVED to allow legend toggling
+        # Increase the right margin to make space for the legend and color bars
+        margin=dict(l=0, r=200, b=0, t=40),
         legend=dict(
             yanchor="top",
             y=0.9,
             xanchor="left",
-            x=1.05, # Adjusted for better spacing
+            # Move the legend further to the right to avoid overlapping the color bars
+            x=1.15,
             bgcolor="rgba(255, 255, 255, 0.8)",
             bordercolor="rgba(0, 0, 0, 0.3)",
             borderwidth=1,
-            title=legend_title # Use the dynamic title
+            title=legend_title
         )
     )
     fig.update_scenes(
@@ -1183,6 +1266,74 @@ def update_figure_layout(fig, vertical_exaggeration=1.0, legend_title="Legend"):
         yaxis_range=[y_min, y_max],
         zaxis_range=[z_min, z_max]
     )
+    
+    ############# AUTOENCODER###############
+def build_and_train_autoencoder(data, bottleneck_size=2, epochs=50):
+    """
+    Builds, compiles, and trains a simple autoencoder model.
+    Returns the trained model and the data scaler.
+    """
+    if data.shape[1] <= bottleneck_size:
+        st.error(f"Bottleneck size ({bottleneck_size}) must be smaller than the number of features ({data.shape[1]}). Please adjust the bottleneck size.")
+        return None, None
+
+    # Scale data between 0 and 1, which is optimal for autoencoders
+    scaler = MinMaxScaler()
+    data_scaled = scaler.fit_transform(data)
+
+    n_features = data.shape[1]
+
+    # Define the model architecture
+    encoder = keras.Sequential([
+        keras.layers.Input(shape=(n_features,)),
+        keras.layers.Dense(n_features * 2, activation='relu'),
+        keras.layers.Dense(n_features, activation='relu'),
+        keras.layers.Dense(bottleneck_size, activation='relu') # The compressed representation
+    ], name="encoder")
+
+    decoder = keras.Sequential([
+        keras.layers.Input(shape=(bottleneck_size,)),
+        keras.layers.Dense(n_features, activation='relu'),
+        keras.layers.Dense(n_features * 2, activation='relu'),
+        keras.layers.Dense(n_features, activation='sigmoid') # Sigmoid activation for output between 0-1
+    ], name="decoder")
+
+    autoencoder = keras.Sequential([encoder, decoder], name="autoencoder")
+
+    # Compile the model
+    autoencoder.compile(optimizer='adam', loss='mse')
+
+    # Train the model
+    with st.spinner(f"Training autoencoder for up to {epochs} epochs..."):
+        # Use an early stopping callback to prevent overfitting and long training times
+        early_stopping = keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, mode='min', restore_best_weights=True)
+        history = autoencoder.fit(
+            data_scaled,
+            data_scaled,
+            epochs=epochs,
+            batch_size=32,
+            validation_split=0.1,
+            verbose=0, # Suppress verbose output in Streamlit
+            callbacks=[early_stopping]
+        )
+
+    # Plot training history
+    st.write("Model Training History:")
+    history_df = pd.DataFrame(history.history)
+    fig_history = px.line(history_df, y=['loss', 'val_loss'], title="Training & Validation Loss")
+    fig_history.update_layout(xaxis_title="Epoch", yaxis_title="Mean Squared Error (Loss)")
+    st.plotly_chart(fig_history, use_container_width=True)
+
+    return autoencoder, scaler
+
+def calculate_reconstruction_error(model, data, scaler):
+    """
+    Calculates the mean squared error for each sample's reconstruction.
+    """
+    data_scaled = scaler.transform(data)
+    reconstructed_data = model.predict(data_scaled)
+    mse = np.mean(np.power(data_scaled - reconstructed_data, 2), axis=1)
+    return mse
 
 # =============================================================================
 # GRADE SHELL GENERATION FUNCTIONS
@@ -2055,13 +2206,26 @@ def create_cluster_visualisation(merged_df, viz_df, collar_df, primary_element, 
     update_figure_layout(fig, vertical_exaggeration)
     return fig
 
-def apply_filters(df, selected_holes, selected_lithos, primary_element=None, min_cutoff=None, max_cutoff=None):
+def apply_filters(df, selected_holes, selected_lithos, selected_clusters=None, primary_element=None, min_cutoff=None, max_cutoff=None):
+    """
+    Filters the dataframe based on user selections for holes, lithologies, clusters, and grade range.
+    """
     filtered_df = df.copy()
     if selected_holes:
         filtered_df = filtered_df[filtered_df['HOLE_ID'].isin(selected_holes)]
     if selected_lithos and 'LITHO' in filtered_df.columns:
         filtered_df = filtered_df[filtered_df['LITHO'].isin(selected_lithos)]
-    if primary_element and min_cutoff is not None and max_cutoff is not None:
+    
+    # Correctly handle the list of selected clusters
+    if selected_clusters and 'Cluster' in filtered_df.columns:
+        # The multiselect widget can return strings, so convert to int for matching
+        selected_clusters_int = [int(c) for c in selected_clusters]
+        filtered_df = filtered_df[filtered_df['Cluster'].isin(selected_clusters_int)]
+
+    if primary_element and min_cutoff is not None and max_cutoff is not None and primary_element in filtered_df.columns:
+        # Ensure data is numeric before filtering to avoid errors
+        numeric_mask = pd.to_numeric(filtered_df[primary_element], errors='coerce').notna()
+        filtered_df = filtered_df[numeric_mask]
         filtered_df = filtered_df[
             (filtered_df[primary_element] >= min_cutoff) &
             (filtered_df[primary_element] <= max_cutoff)
@@ -2370,9 +2534,11 @@ def generate_summary_prompt(user_context=""):
 # =============================================================================
 # MAIN APP: TABS
 
-tab_data, tab_viz, tab_gradeshell, tab_solid_model, tab_stats, tab_clustering, tab_ml_explain, tab_llm, tab_qa, tab_download = st.tabs([
-    "📁 Data Loading", "📏 3D Visualisations", "🩸 Grade Shell", "🧊 3D Solid Model", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🤖 AI GEO Summary", "📋 Data Analysis Playground",  "💾 Export Data"
+tab_data, tab_viz, tab_gradeshell, tab_solid_model, tab_stats, tab_clustering, tab_ml_explain, tab_anomaly, tab_llm, tab_qa, tab_download = st.tabs([
+    "📁 Data Loading", "📏 3D Visualisations", "🩸 Grade Shell", "🧊 3D Solid Model", "📈 Statistics", "⚇ Clustering", "🏷️ ML Explain", "🔎 Anomoly Detection", "🤖 AI GEO", "📋 Data Analysis Playground",  "💾 Export Data"
 ])
+
+
 # =============================================================================
 # DATA LOADING TAB
 # =============================================================================
@@ -2380,46 +2546,30 @@ with tab_data:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📁 Data Loading</h2>", unsafe_allow_html=True)
     st.markdown("Upload your data files to begin analysis or load demo data to quickly explore the app's features.")
 
-
-    
     # --- Demo Data Button Section ---
     if "demo_files_loaded" not in st.session_state:
         st.session_state.demo_files_loaded = False
 
     if not st.session_state.demo_files_loaded:
         if st.button("Load Demo Data"):
+            # (Your demo data loading logic remains the same)
             demo_data_folder = "demo_data"
-            default_format = "Geological Survey Format (Headers in H1000)"
-            
-            collar_file_path = os.path.join(demo_data_folder, "Drill_hole_location.csv")
-            assay_file_path = os.path.join(demo_data_folder, "Drill_hole_geochemistry.csv")
-            litho_file_path = os.path.join(demo_data_folder, "Drill_hole_lithology.csv")
-            litho_dict_file_path = os.path.join(demo_data_folder, "Drill_hole_lithology_dictionary.csv")
-            
-            with open(collar_file_path, "rb") as f:
-                demo_collar = io.BytesIO(f.read())
-                demo_collar.name = "Drill_hole_location.csv"
-                st.session_state.demo_collar_file = demo_collar
-            with open(assay_file_path, "rb") as f:
-                demo_assay = io.BytesIO(f.read())
-                demo_assay.name = "Drill_hole_geochemistry.csv"
-                st.session_state.demo_assay_file = demo_assay
-            with open(litho_file_path, "rb") as f:
-                demo_litho = io.BytesIO(f.read())
-                demo_litho.name = "Drill_hole_lithology.csv"
-                st.session_state.demo_litho_file = demo_litho
-            with open(litho_dict_file_path, "rb") as f:
-                demo_litho_dict = io.BytesIO(f.read())
-                demo_litho_dict.name = "Drill_hole_lithology_dictionary.csv"
-                st.session_state.demo_litho_dict_file = demo_litho_dict
+            with open(os.path.join(demo_data_folder, "Drill_hole_location.csv"), "rb") as f:
+                st.session_state.demo_collar_file = io.BytesIO(f.read())
+                st.session_state.demo_collar_file.name = "Drill_hole_location.csv"
+            with open(os.path.join(demo_data_folder, "Drill_hole_geochemistry.csv"), "rb") as f:
+                st.session_state.demo_assay_file = io.BytesIO(f.read())
+                st.session_state.demo_assay_file.name = "Drill_hole_geochemistry.csv"
+            with open(os.path.join(demo_data_folder, "Drill_hole_lithology.csv"), "rb") as f:
+                st.session_state.demo_litho_file = io.BytesIO(f.read())
+                st.session_state.demo_litho_file.name = "Drill_hole_lithology.csv"
+            with open(os.path.join(demo_data_folder, "Drill_hole_lithology_dictionary.csv"), "rb") as f:
+                st.session_state.demo_litho_dict_file = io.BytesIO(f.read())
+                st.session_state.demo_litho_dict_file.name = "Drill_hole_lithology_dictionary.csv"
             
             st.session_state.demo_files_loaded = True
             st.success("Demo data loaded successfully!")
-            # Rerun the app if possible; otherwise, instruct the user to refresh.
-            if hasattr(st, "experimental_rerun"):
-                st.experimental_rerun()
-            else:
-                st.write("Please refresh the app for demo data to load.")
+            st.rerun()
 
     # --- File Uploader or Demo Data ---
     if st.session_state.get("demo_files_loaded", False):
@@ -2433,144 +2583,84 @@ with tab_data:
         litho_file = st.file_uploader("Upload Lithology File (CSV)", type=["csv"], key="litho_uploader")
         litho_dict_file = st.file_uploader("Upload Lithology Dictionary File (CSV)", type=["csv"], key="litho_dict_uploader")
     
-    # --- CSV format radio button with Geological Survey Format as default ---
     file_format = st.radio(
         "Select CSV File Format",
         ("Standard CSV (Headers in row 1)", "Geological Survey Format (Headers in H1000)"),
-        index=1  # Default to Geological Survey Format
+        index=1
     )
-    
-    # --- Reset session state if new files are uploaded ---
-    if ((collar_file is not None and collar_file != st.session_state.get("previous_collar_file", None)) or 
-        (assay_file is not None and assay_file != st.session_state.get("previous_assay_file", None))):
-        st.session_state.X_scaled = None
-        st.session_state.scaler = None
-        st.session_state.wcss = None
-        st.session_state.n_clusters = 3
-        st.session_state.selected_cluster_features = None
+
+    # --- NEW LOGIC: Only process data if it's new or hasn't been processed yet ---
+    files_changed = (
+        (collar_file is not None and collar_file != st.session_state.get("previous_collar_file")) or
+        (assay_file is not None and assay_file != st.session_state.get("previous_assay_file"))
+    )
+
+    if files_changed or st.session_state.get("merged_df") is None:
+        # Reset all analysis states whenever new data is loaded
+        for key in ['X_scaled', 'scaler', 'wcss', 'merged_df', 'viz_df', 'viz_litho_df', 'significant_intervals', 'anomaly_analysis_complete', 'autoencoder_model', 'anomaly_scaler', 'reconstructed_df', 'clustering_completed']:
+            if key in st.session_state:
+                st.session_state[key] = None
+        
         st.session_state.previous_collar_file = collar_file
         st.session_state.previous_assay_file = assay_file
 
-    # --- Determine valid data combinations and set analysis mode ---
-    valid_data_combinations = False
-    if collar_file:
-        if assay_file and not litho_file:
-            valid_data_combinations = True
-            st.session_state.analysis_mode = "collar_assay"
-        elif litho_file and not assay_file:
-            valid_data_combinations = True
-            st.session_state.analysis_mode = "collar_litho"
-        elif assay_file and litho_file:
-            valid_data_combinations = True
-            st.session_state.analysis_mode = "all"
-    else:
-        st.warning("Collar file is required.")
+        # Determine valid data combinations and set analysis mode
+        valid_data_combinations = False
+        if collar_file:
+            if assay_file and not litho_file:
+                valid_data_combinations = True
+                st.session_state.analysis_mode = "collar_assay"
+            elif litho_file and not assay_file:
+                valid_data_combinations = True
+                st.session_state.analysis_mode = "collar_litho"
+            elif assay_file and litho_file:
+                valid_data_combinations = True
+                st.session_state.analysis_mode = "all"
+        
+        if valid_data_combinations:
+            with st.spinner("Processing and merging data..."):
+                if hasattr(collar_file, 'seek'): collar_file.seek(0)
+                st.session_state.collar_df = process_collar_data(collar_file, file_format)
 
-    # --- Process Data if Combination is Valid ---
-    if valid_data_combinations:
-        # Initialise variables that will be passed to process_and_merge_data
-        # and st.session_state variables that might be accessed later.
-        assay_df = None
-        litho_df = None
-        st.session_state.element_cols = [] # Default to empty list
-        composite_enabled = False           # Default for compositing
-        composite_length = 1.0              # Default for compositing
+                assay_df, litho_df = None, None
+                st.session_state.element_cols = []
+                composite_enabled = st.sidebar.checkbox("Composite geochemical data", key="data_loading_composite_checkbox")
+                composite_length = 1.0
+                if composite_enabled:
+                    composite_length = st.sidebar.slider("Composite Interval (m)", 1.0, 10.0, 2.0, 0.1, key="data_loading_composite_slider")
 
-        # Ensure BytesIO objects (like demo files) are reset before processing
-        if collar_file is not None and hasattr(collar_file, 'seek'):
-            collar_file.seek(0)
-        st.session_state.collar_df = process_collar_data(collar_file, file_format)
-
-        if st.session_state.collar_df is not None:
-            # Process Assay Data if applicable
-            if st.session_state.analysis_mode in ["collar_assay", "all"]:
-                if assay_file is not None and hasattr(assay_file, 'seek'):
-                    assay_file.seek(0)
-                
-                # Call process_assay_data and get its results
-                # temp_vars are used to avoid overwriting session state until success
-                temp_assay_df, temp_element_cols = process_assay_data(assay_file, file_format)
-
-                if temp_assay_df is not None and temp_element_cols is not None:
-                    assay_df = temp_assay_df # Assign to local var for merging
-                    st.session_state.element_cols = temp_element_cols # Update session state
+                if st.session_state.collar_df is not None:
+                    if st.session_state.analysis_mode in ["collar_assay", "all"]:
+                        if hasattr(assay_file, 'seek'): assay_file.seek(0)
+                        assay_df, st.session_state.element_cols = process_assay_data(assay_file, file_format)
                     
-                    # Compositing options in sidebar - these are shown if assay data is loaded.
-                    # Adding unique keys to prevent Streamlit's DuplicateWidgetID error.
-                    # Ideally, these sidebar elements are defined once outside this conditional block.
-                    # The st.sidebar.markdown/header for "OPTIONS" should be defined once globally in your sidebar setup.
-                    # For example:
-                    # with st.sidebar:
-                    #     st.markdown("<h1 style='font-size: 28px;'>OPTIONS</h1>", unsafe_allow_html=True)
-                    #     st.header("Compositing Options")
-                    # Then the checkbox/slider can be here:
-                    composite_enabled = st.sidebar.checkbox("Composite geochemical data", key="data_loading_composite_checkbox")
-                    if composite_enabled:
-                        composite_length = st.sidebar.slider(
-                            "Composite Interval (m)", 
-                            min_value=1.0,  # Ensure float for slider step
-                            max_value=10.0, 
-                            value=2.0, 
-                            step=0.1,       # Add step for float slider
-                            key="data_loading_composite_slider"
-                        )
-                else:
-                    # Assay processing failed or returned None, ensure defaults are used
-                    assay_df = None
-                    st.session_state.element_cols = []
-                    # composite_enabled and composite_length will use their pre-initialized defaults (False, 1.0)
+                    if st.session_state.analysis_mode in ["collar_litho", "all"]:
+                        if hasattr(litho_file, 'seek'): litho_file.seek(0)
+                        litho_df = process_litho_data(litho_file, file_format)
+                        if litho_dict_file:
+                            if hasattr(litho_dict_file, 'seek'): litho_dict_file.seek(0)
+                            st.session_state.litho_dict = process_litho_dict(litho_dict_file, file_format)
 
-            # Process Lithology Data if applicable
-            if st.session_state.analysis_mode in ["collar_litho", "all"]:
-                if litho_file is not None and hasattr(litho_file, 'seek'):
-                    litho_file.seek(0)
-                litho_df = process_litho_data(litho_file, file_format) # Assign to local var
-                
-                st.session_state.litho_dict = None # Reset or initialize
-                if litho_dict_file:
-                    if hasattr(litho_dict_file, 'seek'):
-                        litho_dict_file.seek(0)
-                    st.session_state.litho_dict = process_litho_dict(litho_dict_file, file_format)
-            
-            # Perform merging using the local assay_df, litho_df and current session state/defaults
-            # Ensure element_cols passed is always a list
-            elements_for_merge = st.session_state.element_cols if isinstance(st.session_state.element_cols, list) else []
+                    st.session_state.merged_df, st.session_state.viz_litho_df = process_and_merge_data(
+                        st.session_state.collar_df, assay_df, litho_df, st.session_state.element_cols, composite_enabled, composite_length
+                    )
 
-            st.session_state.merged_df, st.session_state.viz_litho_df = process_and_merge_data(
-                st.session_state.collar_df, 
-                assay_df,  # Use the local variable
-                litho_df,  # Use the local variable
-                elements_for_merge, 
-                composite_enabled, 
-                composite_length
-            )
-
-            if st.session_state.merged_df is not None:
-                st.success("Data loaded and processed successfully!")
-                st.write("Preview of processed data:")
-                st.write(st.session_state.merged_df.head())
-            else:
-                st.error("Failed to process or merge data. Please check your inputs and file contents.")
-
-                # Ensure session state reflects failure if merging fails
-                st.session_state.merged_df = None 
-                st.session_state.viz_litho_df = None
-            # --- Re-attach saved clusters after every data reload ---
-            if 'saved_cluster_labels' in st.session_state and st.session_state.merged_df is not None:
-                labels = st.session_state.saved_cluster_labels
-                # Use .reindex() to safely merge, aligning on the original index.
-                # .fillna(-1) handles any rows that might not have been clustered.
-                st.session_state.merged_df['Cluster'] = labels.reindex(st.session_state.merged_df.index).fillna(-1).astype(int)
-                st.session_state.viz_df['Cluster'] = labels.reindex(st.session_state.viz_df.index).fillna(-1).astype(int)
-        else:
-            # Collar processing failed
-            st.error("Collar data processing failed. Cannot proceed.")
-            st.session_state.merged_df = None
-            st.session_state.viz_litho_df = None
-            st.session_state.element_cols = [] # Ensure reset
+                    st.session_state.original_df = st.session_state.merged_df.copy()
+                    
+                    if st.session_state.merged_df is not None:
+                        st.rerun() # Rerun once after successful processing to clean up the UI
+                    else:
+                        st.error("Failed to process or merge data.")
+    
+    # --- Display data preview (this runs every time, showing the persistent state) ---
+    if st.session_state.get("merged_df") is not None:
+        st.success("Data is loaded and ready for analysis.")
+        st.write("Preview of Processed Data:")
+        st.dataframe(st.session_state.merged_df.head())
     else:
-        st.warning("Invalid data combination. Please check that you have uploaded the required files.")
+        st.info("Please upload your data files or load the demo data to begin.")
 
+        
 with tab_gradeshell:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🩸 Grade Shell Generation</h2>", unsafe_allow_html=True)
     st.markdown("This tool generates a 3D grade shell using a Radial Basis Function (RBF) interpolator. Adjust the parameters and click the button to begin.")
@@ -2656,7 +2746,247 @@ with tab_gradeshell:
     else:
         st.warning("Please load collar and assay data in the 'Data Loading' tab first.")
 
+with tab_anomaly:
+    st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🔎 Geochemical Anomaly Detection</h2>", unsafe_allow_html=True)
+    st.markdown("""
+    This tool uses an Autoencoder neural network to identify geochemically anomalous samples.
+    It learns the 'normal' geochemical signature of your dataset and flags samples that don't fit this pattern.
+    The resulting Anomaly Score measures how poorly the model could reconstruct a sample. A high score indicates a strong anomaly.
+    """)
 
+    # Initialize state variables
+    if 'anomaly_analysis_complete' not in st.session_state:
+        st.session_state.anomaly_analysis_complete = False
+    if 'autoencoder_model' not in st.session_state:
+        st.session_state.autoencoder_model = None
+    if 'anomaly_scaler' not in st.session_state:
+        st.session_state.anomaly_scaler = None
+    if 'reconstructed_df' not in st.session_state:
+        st.session_state.reconstructed_df = None
+    if 'anomaly_features' not in st.session_state:
+        st.session_state.anomaly_features = []
+    if 'anomaly_subset_option' not in st.session_state:
+        st.session_state.anomaly_subset_option = "All Data"
+    if 'anomaly_subset_selection' not in st.session_state:
+        st.session_state.anomaly_subset_selection = []
+
+
+    if st.session_state.get("merged_df") is not None and st.session_state.analysis_mode in ["collar_assay", "all"]:
+        st.subheader("1. Anomaly Detection Setup")
+
+        with st.expander("Select Geochemical Features", expanded=True):
+            if 'anomaly_multiselect_features' not in st.session_state:
+                st.session_state.anomaly_multiselect_features = st.session_state.element_cols[:min(10, len(st.session_state.element_cols))]
+
+            if st.button("Select All Features", key="anomaly_select_all_btn"):
+                st.session_state.anomaly_multiselect_features = st.session_state.element_cols
+            
+            anomaly_features_selection = st.multiselect(
+                "Select elements to define the geochemical signature:",
+                st.session_state.element_cols,
+                key="anomaly_multiselect_features"
+            )
+
+        st.markdown("#### Model Parameters")
+        col1, col2 = st.columns(2)
+        with col1:
+            max_bottleneck = max(1, len(anomaly_features_selection) - 1) if anomaly_features_selection else 1
+            bottleneck_val = max(1, int(len(anomaly_features_selection) / 2)) if anomaly_features_selection else 1
+            is_slider_disabled = (max_bottleneck <= 1)
+            bottleneck_size = st.slider("Bottleneck Size", 1, max_bottleneck, bottleneck_val, 1, key="anomaly_bottleneck", help="Size of the compressed data representation.", disabled=is_slider_disabled)
+        with col2:
+            training_epochs = st.slider("Max Training Epochs", 10, 200, 50, 10, key="anomaly_epochs", help="Max number of training cycles. Early stopping is used.")
+
+        st.subheader("2. Select Data for Model Training")
+        st.info("Select the data subset to train the model on. The model will learn this subset's signature as 'normal'. It will then be applied to the entire dataset to find anomalies relative to this baseline.")
+
+        # --- Robust UI State Management ---
+        training_options = ("All Data", "Specific Cluster", "Specific Lithology")
+        # Set the radio button's index based on the saved state from the last completed run
+        saved_option_index = training_options.index(st.session_state.anomaly_subset_option) if st.session_state.anomaly_subset_option in training_options else 0
+        
+        subset_option = st.radio(
+            "Select data subset for training the anomaly model:",
+            training_options,
+            index=saved_option_index,
+            key="anomaly_subset_option_input"
+        )
+        
+        df_for_training = st.session_state.original_df.copy()
+        if 'Cluster' in st.session_state.merged_df.columns:
+            df_for_training['Cluster'] = st.session_state.merged_df['Cluster']
+
+        subset_selection = []
+        
+        if subset_option == "Specific Cluster":
+            if "Cluster" in df_for_training.columns:
+                valid_clusters = [c for c in df_for_training["Cluster"].unique() if c >= 0]
+                if valid_clusters:
+                    clusters = sorted([str(c) for c in valid_clusters])
+                    # Explicitly define the default selection for the multiselect
+                    default_selection = clusters
+                    if st.session_state.anomaly_subset_option == "Specific Cluster":
+                        default_selection = st.session_state.anomaly_subset_selection
+                    
+                    subset_selection = st.multiselect("Select clusters for training", clusters, default=default_selection, key="anomaly_cluster_select")
+                    df_for_training = df_for_training[df_for_training["Cluster"].astype(str).isin(subset_selection)]
+                else:
+                    st.warning("No valid clusters found. Training will use all data.")
+            else:
+                st.warning("No clustering data available. Training will use all data.")
+        
+        elif subset_option == "Specific Lithology":
+            if "LITHO" in df_for_training.columns:
+                lithos = sorted(df_for_training["LITHO"].astype(str).unique())
+                # Explicitly define the default selection for the multiselect
+                default_selection = lithos
+                if st.session_state.anomaly_subset_option == "Specific Lithology":
+                    default_selection = st.session_state.anomaly_subset_selection
+                
+                subset_selection = st.multiselect("Select lithologies for training", lithos, default=default_selection, key="anomaly_litho_select")
+                df_for_training = df_for_training[df_for_training["LITHO"].astype(str).isin(subset_selection)]
+            else:
+                st.warning("No lithology data available. Training will use all data.")
+
+        st.success(f"The model will be trained on **{len(df_for_training)}** samples.")
+
+        if st.button("Train Model and Detect Anomalies", type="primary", key="anomaly_train_btn"):
+            st.session_state.anomaly_subset_option = subset_option
+            st.session_state.anomaly_subset_selection = subset_selection
+            
+            if len(anomaly_features_selection) < 2:
+                st.error("Please select at least two features for analysis.")
+            else:
+                st.session_state.anomaly_features = anomaly_features_selection
+                data_to_train = df_for_training[st.session_state.anomaly_features].dropna()
+
+                if len(data_to_train) < 40:
+                    st.error(f"Not enough data ({len(data_to_train)} samples) to train. At least 40 are recommended.")
+                    st.session_state.anomaly_analysis_complete = False
+                else:
+                    model, scaler = build_and_train_autoencoder(data_to_train, bottleneck_size, training_epochs)
+                    if model and scaler:
+                        st.success("Model trained successfully!")
+                        full_data_for_scoring = st.session_state.original_df[st.session_state.anomaly_features].fillna(0)
+                        scaled_data = scaler.transform(full_data_for_scoring)
+                        reconstructed_scaled_data = model.predict(scaled_data)
+                        
+                        st.session_state.autoencoder_model = model
+                        st.session_state.anomaly_scaler = scaler
+                        st.session_state.reconstructed_df = pd.DataFrame(scaler.inverse_transform(reconstructed_scaled_data), index=full_data_for_scoring.index, columns=st.session_state.anomaly_features)
+                        
+                        anomaly_scores = np.mean(np.power(scaled_data - reconstructed_scaled_data, 2), axis=1)
+                        
+                        st.session_state.original_df['Anomaly_Score'] = anomaly_scores
+                        st.session_state.merged_df['Anomaly_Score'] = anomaly_scores
+                        
+                        st.session_state.anomaly_analysis_complete = True
+                        st.rerun()
+                    else:
+                        st.error("Model training failed. Please check parameters and data.")
+                        st.session_state.anomaly_analysis_complete = False
+        
+        if st.session_state.anomaly_analysis_complete:
+            st.subheader("3. Inspect Anomalies")
+
+            df_display = st.session_state.original_df.copy()
+            if 'Cluster' in st.session_state.merged_df.columns:
+                df_display['Cluster'] = st.session_state.merged_df['Cluster']
+
+            st.info(f"Displaying results for the training subset: **{st.session_state.anomaly_subset_option}**.")
+            if st.session_state.anomaly_subset_option == "Specific Cluster":
+                df_display = df_display[df_display["Cluster"].astype(str).isin(st.session_state.anomaly_subset_selection)]
+            elif st.session_state.anomaly_subset_option == "Specific Lithology":
+                df_display = df_display[df_display["LITHO"].astype(str).isin(st.session_state.anomaly_subset_selection)]
+
+            if 'Anomaly_Score' not in df_display.columns or df_display.empty:
+                 st.warning("Anomaly scores not found in the current view or the subset is empty.")
+                 st.stop()
+
+            anomaly_scores = df_display['Anomaly_Score']
+
+            st.markdown("#### Anomaly Score Distribution")
+            fig_hist = px.histogram(x=anomaly_scores, nbins=50, title="Distribution of Anomaly Scores", log_y=True)
+            fig_hist.update_layout(xaxis_title="Anomaly Score (Reconstruction Error)", yaxis_title="Count (Log Scale)")
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            st.markdown("#### Inspect Anomalous Samples")
+            default_cutoff = np.percentile(anomaly_scores, 95) if not anomaly_scores.empty else 0
+            min_score = float(anomaly_scores.min()) if not anomaly_scores.empty else 0
+            max_score = float(anomaly_scores.max()) if not anomaly_scores.empty else 1
+            
+            anomaly_cutoff = st.slider("Set Anomaly Score Cutoff", min_score, max_score, float(default_cutoff))
+            
+            anomalous_samples_df = df_display[df_display['Anomaly_Score'] >= anomaly_cutoff].sort_values('Anomaly_Score', ascending=False)
+            st.write(f"Found {len(anomalous_samples_df)} samples with an Anomaly Score >= {anomaly_cutoff:.4f} in the current view.")
+            cols_to_show = ['HOLE_ID', 'FROM', 'TO', 'Anomaly_Score'] + st.session_state.anomaly_features
+            st.dataframe(anomalous_samples_df[cols_to_show])
+
+            if not anomalous_samples_df.empty:
+                st.markdown("#### Reconstruction Comparison")
+                sample_options = [f"Index: {idx} (Hole: {row['HOLE_ID']}, From: {row['FROM']:.2f}m)" for idx, row in anomalous_samples_df.iterrows()]
+                selected_sample_str = st.selectbox("Choose a sample to inspect:", sample_options, key="anomaly_sample_select")
+                
+                if selected_sample_str:
+                    selected_index = int(selected_sample_str.split(" ")[1])
+                    original_vals = st.session_state.original_df.loc[selected_index][st.session_state.anomaly_features]
+                    reconstructed_vals = st.session_state.reconstructed_df.loc[selected_index]
+                    comparison_df = pd.DataFrame({'Original': original_vals, 'Reconstructed': reconstructed_vals})
+                    comparison_df['Difference'] = comparison_df['Original'] - comparison_df['Reconstructed']
+                    st.dataframe(comparison_df.style.format('{:.4f}'))
+
+                    fig_comp = go.Figure(data=[go.Bar(name='Original', x=comparison_df.index, y=comparison_df['Original']), go.Bar(name='Reconstructed', x=comparison_df.index, y=comparison_df['Reconstructed'])])
+                    fig_comp.update_layout(barmode='group', title=f"Original vs. Reconstructed Values for Sample {selected_index}")
+                    st.plotly_chart(fig_comp, use_container_width=True)
+
+            st.subheader("4. 3D Visualisation of Anomalies")
+            
+            viz_options = ["Anomaly Score"]
+            if st.session_state.element_cols:
+                viz_options.append("Grade")
+            if 'Cluster' in df_display.columns:
+                viz_options.append("Clusters")
+            if 'LITHO' in df_display.columns:
+                viz_options.append("Lithology")
+
+            selected_viz_anomaly = st.multiselect(
+                "Select data to display:",
+                viz_options,
+                default=["Anomaly Score"],
+                key="anomaly_viz_type"
+            )
+            
+            primary_element_for_viz = None
+            use_log_scale_for_grade = True
+            if "Grade" in selected_viz_anomaly:
+                col1, col2 = st.columns(2)
+                with col1:
+                    primary_element_for_viz = st.selectbox("Select element for Grade view:", st.session_state.element_cols, key="anomaly_grade_select")
+                with col2:
+                    use_log_scale_for_grade = st.checkbox("Use log scale for grade", value=True, key="anomaly_grade_log")
+            
+            vertical_exaggeration_anomaly = st.slider("Vertical Exaggeration", 1.0, 10.0, 1.0, 0.1, key="anomaly_3d_exag")
+            
+            fig_3d_anomaly = create_combined_3d_visualisation(
+                df=df_display,
+                collar_df=st.session_state.collar_df,
+                viz_litho_df=st.session_state.viz_litho_df,
+                litho_dict=st.session_state.litho_dict,
+                selected_viz=selected_viz_anomaly,
+                primary_element=primary_element_for_viz,
+                use_log_scale=use_log_scale_for_grade,
+                vertical_exaggeration=vertical_exaggeration_anomaly,
+                legend_title="Anomaly Plot"
+            )
+            
+            st.plotly_chart(fig_3d_anomaly)
+            html_string, filename = create_html_download(fig_3d_anomaly, "anomaly_detection_3d_plot")
+            st.download_button(label="📥 Download 3D Anomaly Plot (HTML)", data=html_string, file_name=filename, mime="text/html")
+    
+    else:
+        st.warning("Please load collar and assay data in the 'Data Loading' tab to use this feature.")
+
+        
 with tab_solid_model:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>🧊 3D Solid Model Generation</h2>", unsafe_allow_html=True)
     st.markdown("Generate 3D solids for categorical data like lithology or clusters using an anisotropic RBF interpolator.")
@@ -2830,7 +3160,7 @@ with tab_solid_model:
                                                 mode='lines',
                                                 line=dict(
                                                     color=color,
-                                                    width=8  # Increased thickness
+                                                    width=15  
                                                 ),
                                                 name=f"Trace: {unit_name}", # Name for hover and legend
                                                 legendgroup=legend_group,
@@ -2958,67 +3288,67 @@ with tab_ml_explain:
 with tab_viz:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📏 3D Visualisation</h2>", unsafe_allow_html=True)
     if st.session_state.merged_df is not None:
-        original_merged_df = st.session_state.merged_df.copy()
-        st.session_state.viz_df = st.session_state.merged_df.copy()
-        st.sidebar.header("Filter Options")
-        st.session_state.apply_filters_globally = st.sidebar.checkbox(
-            "Apply filters to all analyses (not just visualisation)", 
-            value=st.session_state.apply_filters_globally
+        # Create a local copy of the data to filter for this tab's visualizations
+        viz_df = st.session_state.merged_df.copy()
+
+        # --- In-Tab Filters ---
+        with st.expander("Filter Visualization Data", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Hole ID Filter
+                all_holes = sorted(viz_df['HOLE_ID'].unique())
+                selected_holes = st.multiselect("Filter by Hole ID", options=all_holes, key="viz_hole_filter")
+
+                # Lithology Filter
+                selected_lithos = []
+                if 'LITHO' in viz_df.columns:
+                    all_lithos = sorted(viz_df['LITHO'].dropna().unique())
+                    selected_lithos = st.multiselect("Filter by Lithology", options=all_lithos, key="viz_litho_filter")
+
+            with col2:
+                # Grade Filter
+                primary_element = None
+                min_cutoff, max_cutoff = None, None
+                if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
+                    primary_element = st.selectbox("Select element for Grade filter", st.session_state.element_cols, key="viz_element_filter")
+                    min_val = float(viz_df[primary_element].min())
+                    max_val = float(viz_df[primary_element].max())
+                    min_cutoff, max_cutoff = st.slider(
+                        f"Filter by {primary_element} range", min_val, max_val, (min_val, max_val), key="viz_grade_slider"
+                    )
+                
+                use_log_scale = st.checkbox("Use log scale for grade color", value=True, key="viz_log_scale")
+
+            with col3:
+                # Cluster Filter
+                selected_clusters = []
+                if 'Cluster' in viz_df.columns:
+                    all_clusters = sorted([c for c in viz_df['Cluster'].unique() if c >= 0])
+                    if all_clusters:
+                        selected_clusters = st.multiselect("Filter by Cluster", options=all_clusters, key="viz_cluster_filter")
+
+        # Apply all selected filters to the local dataframe for visualization
+        viz_df = apply_filters(
+            viz_df, selected_holes, selected_lithos, selected_clusters, primary_element, min_cutoff, max_cutoff
         )
-        selected_holes = []
-        selected_lithos = []
-        all_holes = sorted(st.session_state.merged_df['HOLE_ID'].unique())
-        selected_holes = st.sidebar.multiselect("Select holes to display (empty for all)", options=all_holes)
-        use_log_scale = st.sidebar.checkbox("Use log scale", value=True, key="main_log_scale")
-
-        primary_element = None
-        min_cutoff = None
-        max_cutoff = None
         
-        if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
-            primary_element = st.sidebar.selectbox("Select element for analysis:", st.session_state.element_cols)
-            min_cutoff, max_cutoff = st.sidebar.slider(
-                f"{primary_element} cutoff range",
-                min_value=float(st.session_state.merged_df[primary_element].min()),
-                max_value=float(st.session_state.merged_df[primary_element].max()),
-                value=(float(st.session_state.merged_df[primary_element].min()), float(st.session_state.merged_df[primary_element].max())),
-                step=0.1
-            )
-
-        if 'LITHO' in st.session_state.merged_df.columns:
-            all_lithos = sorted(st.session_state.merged_df['LITHO'].unique())
-            selected_lithos = st.sidebar.multiselect(
-                "Select lithologies to display (empty for all)",
-                options=all_lithos
-            )
-        
-        st.session_state.viz_df = apply_filters(st.session_state.viz_df, selected_holes, selected_lithos, primary_element, min_cutoff, max_cutoff)
-        viz_litho_df = st.session_state.viz_litho_df
-        if viz_litho_df is not None:
-            if selected_holes:
-                viz_litho_df = viz_litho_df[viz_litho_df['HOLE_ID'].isin(selected_holes)]
-            if selected_lithos and 'LITHO' in viz_litho_df.columns:
-                viz_litho_df = viz_litho_df[viz_litho_df['LITHO'].isin(selected_lithos)]
+        # Filter collar and lithology visualization dataframes based on selected holes
         viz_collar_df = st.session_state.collar_df.copy()
         if selected_holes:
             viz_collar_df = viz_collar_df[viz_collar_df['HOLE_ID'].isin(selected_holes)]
-        if st.session_state.apply_filters_globally:
-            st.session_state.merged_df = apply_filters(st.session_state.merged_df, selected_holes, selected_lithos, primary_element, min_cutoff, max_cutoff)
-            if 'previous_filter_state' not in st.session_state or st.session_state.previous_filter_state != (tuple(selected_holes), tuple(selected_lithos), primary_element, min_cutoff, max_cutoff):
-                st.session_state.X_scaled = None
-                st.session_state.scaler = None
-                st.session_state.wcss = None
-                st.session_state.previous_filter_state = (tuple(selected_holes), tuple(selected_lithos), primary_element, min_cutoff, max_cutoff)
-        else:
-            st.session_state.merged_df = original_merged_df.copy()
+        
+        viz_litho_df_filtered = st.session_state.viz_litho_df.copy() if st.session_state.viz_litho_df is not None else None
+        if viz_litho_df_filtered is not None:
+            # Also filter litho viz data by selected lithologies if that filter is active
+             if selected_lithos:
+                viz_litho_df_filtered = viz_litho_df_filtered[viz_litho_df_filtered['LITHO'].isin(selected_lithos)]
+             if selected_holes:
+                viz_litho_df_filtered = viz_litho_df_filtered[viz_litho_df_filtered['HOLE_ID'].isin(selected_holes)]
 
-        vertical_exaggeration = st.slider(
-            "Vertical Exaggeration", 
-            min_value=1.0, 
-            max_value=10.0, 
-            value=1.0, 
-            step=0.1
-        )
+
+        # --- Visualization Controls and Plotting ---
+        vertical_exaggeration = st.slider("Vertical Exaggeration", 1.0, 10.0, 1.0, 0.1, key="viz_exaggeration")
 
         viz_options = []
         if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
@@ -3035,121 +3365,35 @@ with tab_viz:
         )
 
         if selected_viz:
-            fig = go.Figure()
-            offsets = {"Grade": 0, "Clusters": 20, "Lithology": -20}
-            for viz_type in selected_viz:
-                if viz_type == "Grade" and st.session_state.analysis_mode in ["collar_assay", "all"] and 'primary_element' in locals():
-                    if not st.session_state.viz_df.empty:
-                        add_grade_visualisation(fig, st.session_state.viz_df, primary_element, use_log_scale, "Combined", color_by='grade', x_offset=offsets["Grade"])
-                        for hole in st.session_state.viz_df['HOLE_ID'].unique():
-                            hole_data = st.session_state.viz_df[st.session_state.viz_df['HOLE_ID'] == hole]
-                            collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole].iloc[0]
-                            x_line = [collar_point['EASTING'] + offsets["Grade"]] + (hole_data['x'] + offsets["Grade"]).tolist()
-                            y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                            z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                            fig.add_trace(go.Scatter3d(
-                                x=x_line, y=y_line, z=z_line,
-                                mode='lines',
-                                line=dict(color='gray', width=1),
-                                showlegend=False
-                            ))
-                        add_collar_points(fig, viz_collar_df, x_offset=offsets["Grade"])
-                    else:
-                        st.warning("No data available for Grade visualisation after applying filters.")
-
-                if viz_type == "Lithology" and viz_litho_df is not None:
-                    if not viz_litho_df.empty:
-                        add_lithology_visualisation(fig, viz_litho_df, "Combined", selected_lithos, st.session_state.litho_dict, x_offset=offsets["Lithology"])
-                        for hole in viz_litho_df['HOLE_ID'].unique():
-                            hole_data = viz_litho_df[viz_litho_df['HOLE_ID'] == hole]
-                            collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole].iloc[0]
-                            x_line = [collar_point['EASTING'] + offsets["Lithology"]] + (hole_data['x'] + offsets["Lithology"]).tolist()
-                            y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                            z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                            fig.add_trace(go.Scatter3d(
-                                x=x_line, y=y_line, z=z_line,
-                                mode='lines',
-                                line=dict(color='gray', width=1),
-                                showlegend=False
-                            ))
-                        add_collar_points(fig, viz_collar_df, x_offset=offsets["Lithology"])
-                    else:
-                        st.warning("No data available for Lithology visualisation after applying filters.")
-                        
-                if viz_type == "Clusters" and 'Cluster' in st.session_state.viz_df.columns:
-                    cluster_viz_df = st.session_state.viz_df[st.session_state.viz_df['Cluster'] >= 0].copy()
-                    
-                    if not cluster_viz_df.empty:
-                        for cluster in sorted(cluster_viz_df['Cluster'].unique()):
-                            cluster_data = cluster_viz_df[cluster_viz_df['Cluster'] == cluster]
-                            hover_text = []
-                            for _, row in cluster_data.iterrows():
-                                info = [
-                                    f"<b>Hole ID:</b> {row['HOLE_ID']}",
-                                    f"<b>Cluster:</b> {cluster}"
-                                ]
-                                if 'primary_element' in locals():
-                                    info.append(f"<b>{primary_element}:</b> {row[primary_element]:.2f}")
-                                info.append(f"<b>From:</b> {row['FROM']:.2f}")
-                                info.append(f"<b>To:</b> {row['TO']:.2f}")
-                                if 'LITHO' in row:
-                                    info.append(f"<b>Lithology:</b> {row['LITHO']}")
-                                hover_text.append("<br>".join(info))
-                            fig.add_trace(go.Scatter3d(
-                                x=cluster_data['x'] + offsets["Clusters"],
-                                y=cluster_data['y'],
-                                z=cluster_data['z'],
-                                mode='markers',
-                                marker=dict(
-                                    size=8,
-                                    color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)]
-                                ),
-                                name=f'Cluster {cluster}',
-                                hovertemplate="%{text}<br>" +
-                                            "<b>X:</b> %{x:.2f}<br>" +
-                                            "<b>Y:</b> %{y:.2f}<br>" +
-                                            "<b>Z:</b> %{z:.2f}<extra></extra>",
-                                text=hover_text
-                            ))
-                        for hole in st.session_state.viz_df['HOLE_ID'].unique():
-                            hole_data = st.session_state.viz_df[st.session_state.viz_df['HOLE_ID'] == hole]
-                            collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole].iloc[0]
-                            x_line = [collar_point['EASTING'] + offsets["Clusters"]] + (hole_data['x'] + offsets["Clusters"]).tolist()
-                            y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                            z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                            fig.add_trace(go.Scatter3d(
-                                x=x_line, y=y_line, z=z_line,
-                                mode='lines',
-                                line=dict(color='gray', width=1),
-                                showlegend=False
-                            ))
-                    else:
-                        st.warning("No cluster data available for visualisation after applying filters.")
-
-            update_figure_layout(fig, vertical_exaggeration)
-            st.plotly_chart(fig)
-            # Store figure and add download button
-            st.session_state.main_3d_figure = fig
-            html_string, filename = create_html_download(fig, "3D_visualisation")
-            st.download_button(
-                label="📊 Download 3D Visualisation (HTML)",
-                data=html_string,
-                file_name=filename,
-                mime="text/html",
-                help="Download interactive 3D plot as HTML file",
-                key="download_3d_viz"
-            )
+            if not viz_df.empty:
+                fig = create_combined_3d_visualisation(
+                    df=viz_df,
+                    collar_df=viz_collar_df,
+                    viz_litho_df=viz_litho_df_filtered,
+                    litho_dict=st.session_state.litho_dict,
+                    selected_viz=selected_viz,
+                    primary_element=primary_element,
+                    use_log_scale=use_log_scale,
+                    vertical_exaggeration=vertical_exaggeration,
+                    legend_title="Combined Plot"
+                )
+                
+                st.plotly_chart(fig)
+                html_string, filename = create_html_download(fig, "3D_visualisation")
+                st.download_button(label="📊 Download 3D Visualisation (HTML)", data=html_string, file_name=filename, mime="text/html", key="download_3d_viz")
+            else:
+                st.warning("No data remains after applying filters. Please adjust your filter settings.")
+        
         else:
             st.warning("Please select at least one visualisation type.")
-
-        # CROSS SECTION FUNCTIONALITY - MOVED BEFORE SWATH PLOTS
-        st.markdown("---")  # Add separator
+            
+        # --- Cross Section and Swath Plots (using the locally filtered viz_df) ---
+        st.markdown("---")
         st.markdown("<h3 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>✂️ Drill Fence Cross Sections</h3>", unsafe_allow_html=True)
         
         st.markdown("### Define Drill Fence Section")
         st.write("Select drill holes to create a fence section. Lithology will display on the left side of drill traces, grades on the right side.")
         
-        # Get unique hole coordinates for fence selection
         hole_coords = st.session_state.collar_df[['HOLE_ID', 'EASTING', 'NORTHING']].copy()
         
         col1, col2 = st.columns([2, 1])
@@ -3164,10 +3408,8 @@ with tab_viz:
             )
         
         with col2:
-            # Section width
             section_width = st.slider("Section Width (m)", min_value=10.0, max_value=200.0, value=50.0, step=10.0, key="cross_section_width")
             
-            # Element selection
             primary_element_cross = None
             if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
                 primary_element_cross = st.selectbox("Grade element:", st.session_state.element_cols, key="cross_section_element")
@@ -3176,7 +3418,6 @@ with tab_viz:
         if len(selected_holes_cross) >= 2:
             fence_holes = hole_coords[hole_coords['HOLE_ID'].isin(selected_holes_cross)]
             
-            # Use first and last holes from the selected list (no PCA sorting)
             first_hole = fence_holes[fence_holes['HOLE_ID'] == selected_holes_cross[0]].iloc[0]
             last_hole = fence_holes[fence_holes['HOLE_ID'] == selected_holes_cross[-1]].iloc[0]
             
@@ -3185,17 +3426,15 @@ with tab_viz:
             
             st.success(f"Drill fence from **{first_hole['HOLE_ID']}** to **{last_hole['HOLE_ID']}** ({len(selected_holes_cross)} holes selected)")
             
-            # Show section line on map
             st.subheader("Drill Fence Location")
             map_fig = create_section_line_map(
-                st.session_state.merged_df, 
+                viz_df, # Use filtered data for the map
                 st.session_state.collar_df,
                 section_line_start, 
                 section_line_end, 
                 section_width
             )
             
-            # Highlight selected holes on the map
             selected_hole_coords = hole_coords[hole_coords['HOLE_ID'].isin(selected_holes_cross)]
             map_fig.add_trace(go.Scatter(
                 x=selected_hole_coords['EASTING'],
@@ -3208,11 +3447,10 @@ with tab_viz:
             
             st.plotly_chart(map_fig, use_container_width=True)
             
-            # Generate cross-section
             if st.button("Generate Drill Fence Cross Section", type="primary", key="generate_cross_section"):
                 with st.spinner("Generating drill fence cross-section..."):
                     fig_cross = create_drill_fence_cross_section(
-                        st.session_state.merged_df,
+                        viz_df, # Use filtered data for the section
                         st.session_state.viz_litho_df,
                         st.session_state.collar_df,
                         section_line_start,
@@ -3226,8 +3464,6 @@ with tab_viz:
                     if fig_cross:
                         st.subheader("Drill Fence Cross Section")
                         st.plotly_chart(fig_cross, use_container_width=True)
-                        
-                        # Add some explanatory text
                         st.info("📍 **Reading the Cross Section:**\n"
                                "- **Black lines** = Drill hole traces\n"
                                "- **Left side (coloured bars)** = Lithology intervals\n" 
@@ -3238,27 +3474,55 @@ with tab_viz:
         else:
             st.warning("⚠️ Please select at least 2 holes to create a drill fence section.")
 
-        # SWATH PLOTS 
-        if st.session_state.analysis_mode in ["collar_assay", "all"] and 'primary_element' in locals():
-            if not st.session_state.merged_df.empty:
-                create_swath_plots(st.session_state.merged_df, primary_element, use_log_scale)
+        if st.session_state.analysis_mode in ["collar_assay", "all"] and primary_element:
+            if not viz_df.empty:
+                create_swath_plots(viz_df, primary_element, use_log_scale)
             
     else:
         st.warning("Please load data in the Data Loading tab first.")
+
 
 with tab_stats:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>📈 Statistical Analysis</h2>", unsafe_allow_html=True)
     
     if st.session_state.merged_df is not None:
-        if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
-            if not st.session_state.merged_df.empty:
+        # Create a local copy of the data to be filtered for this tab
+        stats_df = st.session_state.merged_df.copy()
+
+        # --- In-Tab Filters for Statistics ---
+        with st.expander("Filter Data for Statistical Analysis", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                selected_lithos_stats = []
+                if 'LITHO' in stats_df.columns:
+                    all_lithos = sorted(stats_df['LITHO'].dropna().unique())
+                    selected_lithos_stats = st.multiselect("Filter by Lithology", all_lithos, key="stats_litho_filter")
+            
+            with col2:
+                selected_clusters_stats = []
+                if 'Cluster' in stats_df.columns:
+                    all_clusters = sorted([c for c in stats_df['Cluster'].unique() if c >= 0])
+                    if all_clusters:
+                        selected_clusters_stats = st.multiselect("Filter by Cluster", all_clusters, key="stats_cluster_filter")
+
+            # Apply filters if any are selected
+            if selected_lithos_stats:
+                stats_df = stats_df[stats_df['LITHO'].isin(selected_lithos_stats)]
+            if selected_clusters_stats:
+                stats_df = stats_df[stats_df['Cluster'].isin(selected_clusters_stats)]
+
+        # --- Run Analyses on the (potentially filtered) stats_df ---
+        if not stats_df.empty:
+            if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
                 primary_element = st.selectbox("Select element for statistical analysis:", 
                                                st.session_state.element_cols,
                                                key="stats_primary_element")
                 use_log_scale = st.checkbox("Use log scale for visualisations", value=True, key="stats_log_scale")
-                show_statistical_analysis(st.session_state.merged_df, primary_element, use_log_scale)
+                
+                show_statistical_analysis(stats_df, primary_element, use_log_scale)
+                
                 st.header("Correlation Analysis")
-                correlation_matrix = st.session_state.merged_df[st.session_state.element_cols].corr()
+                correlation_matrix = stats_df[st.session_state.element_cols].corr()
                 fig = go.Figure(data=go.Heatmap(
                     z=correlation_matrix,
                     x=st.session_state.element_cols,
@@ -3272,6 +3536,7 @@ with tab_stats:
                 ))
                 fig.update_layout(title="Correlation Matrix", height=500, width=500)
                 st.plotly_chart(fig)
+                
                 st.subheader("Element selection for Correlation Analysis and Scatter Diagrams")
                 scatter_elements = st.multiselect(
                     "Select elements for scatter plot (minimum 2)",
@@ -3281,7 +3546,7 @@ with tab_stats:
                 if len(scatter_elements) >= 2:
                     st.subheader("Selected Elements Correlation Matrix")
                     corr_stats = pd.DataFrame(
-                        [[st.session_state.merged_df[e1].corr(st.session_state.merged_df[e2]) for e2 in scatter_elements]
+                        [[stats_df[e1].corr(stats_df[e2]) for e2 in scatter_elements]
                             for e1 in scatter_elements],
                         columns=scatter_elements,
                         index=scatter_elements
@@ -3324,11 +3589,11 @@ with tab_stats:
                         row = idx // n_cols + 1
                         col = idx % n_cols + 1
                         scatter = go.Scatter(
-                            x=st.session_state.merged_df[elem1], y=st.session_state.merged_df[elem2],
+                            x=stats_df[elem1], y=stats_df[elem2],
                             mode='markers',
                             marker=dict(
                                 size=6,
-                                color=st.session_state.merged_df[primary_element],
+                                color=stats_df[primary_element],
                                 colorscale='Viridis',
                                 showscale=True if idx == 0 else False,
                                 colorbar=dict(title=primary_element) if idx == 0 else None,
@@ -3344,8 +3609,8 @@ with tab_stats:
                                 min_val = max(data.min(), 1e-10)
                                 max_val = data.max()
                                 return np.logspace(np.log10(min_val), np.log10(max_val), num=6)
-                            x_ticks = log_tick_values(st.session_state.merged_df[elem1])
-                            y_ticks = log_tick_values(st.session_state.merged_df[elem2])
+                            x_ticks = log_tick_values(stats_df[elem1])
+                            y_ticks = log_tick_values(stats_df[elem2])
                             fig.update_xaxes(
                                 type="log",
                                 tickmode='array',
@@ -3375,43 +3640,43 @@ with tab_stats:
                 with col3:
                     interval_cutoff = st.number_input(
                         f"Minimum {primary_element} Grade",
-                        value=float(st.session_state.merged_df[primary_element].median()),
-                        min_value=float(st.session_state.merged_df[primary_element].min()),
-                        max_value=float(st.session_state.merged_df[primary_element].max()),
+                        value=float(stats_df[primary_element].median()),
+                        min_value=float(stats_df[primary_element].min()),
+                        max_value=float(stats_df[primary_element].max()),
                         step=0.1
                     )
                 if st.button("Calculate Significant Intervals"):
                     st.session_state.significant_intervals = calculate_significant_intervals(
-                        st.session_state.merged_df, primary_element, interval_cutoff, min_length, max_internal_waste, st.session_state.litho_dict
+                        stats_df, primary_element, interval_cutoff, min_length, max_internal_waste, st.session_state.litho_dict
                     )
                     if not st.session_state.significant_intervals.empty:
                         st.write(st.session_state.significant_intervals)
                     else:
                         st.warning("No significant intervals found with current parameters.")
-            else:
-                st.warning("No data available for analysis after applying filters.")
-        
-        if st.session_state.analysis_mode in ["collar_litho", "all"] and 'LITHO' in st.session_state.merged_df.columns:
-            if not st.session_state.merged_df.empty:
+            
+            if st.session_state.analysis_mode in ["collar_litho", "all"] and 'LITHO' in stats_df.columns:
                 if st.session_state.analysis_mode == "collar_litho":
-                    st.session_state.merged_df['DUMMY'] = 1.0
+                    stats_df['DUMMY'] = 1.0
                     primary_element = 'DUMMY'
                 else:
                     primary_element = st.selectbox("Select element for lithology analysis:", 
                                                   st.session_state.element_cols,
                                                   key="litho_primary_element")
                 use_log_scale = st.checkbox("Use log scale for lithology analysis", value=True, key="litho_log_scale")
-                create_lithology_analysis(st.session_state.merged_df, primary_element, use_log_scale, st.session_state.litho_dict)
-            else:
-                st.warning("No data available for lithology analysis after applying filters.")
+                create_lithology_analysis(stats_df, primary_element, use_log_scale, st.session_state.litho_dict)
+        else:
+            st.warning("No data available for analysis after applying filters.")
     else:
         st.warning("Please load data in the Data Loading tab first.")
 
 with tab_clustering:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>⚇ Geochemical Clustering</h2>", unsafe_allow_html=True)
+    
     if st.session_state.merged_df is not None and st.session_state.analysis_mode in ["collar_assay", "all"]:
+        # --- UI for selecting features ---
         if 'selected_cluster_features' not in state or state.selected_cluster_features is None:
             state.selected_cluster_features = st.session_state.element_cols[:min(5, len(st.session_state.element_cols))]
+        
         col1, col2 = st.columns([1, 3])
         with col1:
             if st.button("Select All Features"):
@@ -3423,1027 +3688,181 @@ with tab_clustering:
                 default=state.selected_cluster_features,
                 key="cluster_features_select"
             )
+        
+        # --- UI for selecting data subset ---
+        st.subheader("Select Data Subset for Clustering")
+        subset_option_cluster = st.radio(
+            "Perform clustering on:",
+            ("All Data", "Specific Lithology"),
+            key="cluster_subset_option"
+        )
+        
+        cluster_df_for_analysis = st.session_state.merged_df.copy()
+        
+        if subset_option_cluster == "Specific Lithology":
+            if 'LITHO' in cluster_df_for_analysis.columns:
+                all_lithos = sorted(cluster_df_for_analysis['LITHO'].dropna().unique())
+                selected_lithos_cluster = st.multiselect(
+                    "Select lithologies to include in clustering", 
+                    all_lithos, 
+                    default=all_lithos, 
+                    key="cluster_litho_select"
+                )
+                if selected_lithos_cluster:
+                    cluster_df_for_analysis = cluster_df_for_analysis[cluster_df_for_analysis['LITHO'].isin(selected_lithos_cluster)]
+            else:
+                st.warning("No lithology data available. Clustering will use all data.")
+
+        # --- Clustering Parameters and Execution ---
         use_pca = st.checkbox("Perform PCA before clustering", value=False)
         use_log_transform = st.checkbox("Apply natural log transform", value=False)
+        
         if use_pca:
             n_components = st.slider("Maximum number of components to consider", 2, len(cluster_features), min(3, len(cluster_features)))
+        
         max_clusters = st.slider("Maximum number of clusters to consider", min_value=2, max_value=15, value=5)
-        if st.button("Confirm Selection and Analyse Clusters"):
+
+        if st.button("Analyse Clusters"):
             state.selected_cluster_features = cluster_features
-            cluster_df = st.session_state.merged_df.copy()
+            
             state.X_scaled, state.scaler, state.wcss = run_clustering_analysis(
-                cluster_df, cluster_features, use_pca, use_log_transform, 
+                cluster_df_for_analysis, cluster_features, use_pca, use_log_transform, 
                 n_components if use_pca else None, max_clusters
             )
-            if state.X_scaled is not None:
-                st.subheader("Clustering Scree Plot")
-                st.plotly_chart(plot_scree(wcss=state.wcss, is_pca=False))
-                state.n_clusters = st.number_input("Select number of clusters", min_value=2, max_value=max_clusters, value=state.n_clusters)
-                kmeans = KMeans(n_clusters=state.n_clusters, random_state=42, n_init=10)
-                cluster_labels = kmeans.fit_predict(state.X_scaled)
-                st.session_state.saved_cluster_labels = pd.Series(cluster_labels, index=cluster_df.index)
-                # Assign clusters directly to the rows that were clustered
-                cluster_df['Cluster'] = cluster_labels
+            state.clustered_data_index = cluster_df_for_analysis.index
+            st.session_state.clustering_completed = False
 
-                # Initialize all rows in merged_df to -1
-# -----------------------------------------------------------------
-                # 1.  Give every row the default label -1
-                st.session_state.merged_df['Cluster'] = -1
-                st.session_state.viz_df  ['Cluster'] = -1
-
-                # 2.  Push the K-means labels back into the rows that were clustered
-                #     (cluster_df is a straight copy of merged_df *before* clustering,
-                #      so they still share the same index.)
-                st.session_state.merged_df.loc[cluster_df.index, 'Cluster'] = cluster_labels
-                st.session_state.viz_df  .loc[cluster_df.index, 'Cluster'] = cluster_labels
-                # -----------------------------------------------------------------
-
-                st.session_state.clustering_completed = True
-                if not use_pca:
-                    if use_log_transform:
-                        cluster_centers = pd.DataFrame(
-                            np.exp(state.scaler.inverse_transform(kmeans.cluster_centers_)) - 1e-10,
-                            columns=cluster_features
-                        )
-                    else:
-                        cluster_centers = pd.DataFrame(
-                            state.scaler.inverse_transform(kmeans.cluster_centers_),
-                            columns=state.selected_cluster_features
-                        )
-                    st.write("Cluster Centers:")
-                    st.write(cluster_centers)
-                st.subheader("3D PCA of Clusters")
-                def plot_3d_pca(X_scaled, n_clusters, kmeans, feature_names):
-                    n_components_here = X_scaled.shape[1]
-                    pca_3d = PCA(n_components=min(3, n_components_here))
-                    X_pca_3d = pca_3d.fit_transform(X_scaled)
-                    fig_3d = go.Figure()
-                    if n_components_here >= 3:
-                        for i in range(n_clusters):
-                            cluster_points = X_pca_3d[kmeans.labels_ == i]
-                            fig_3d.add_trace(go.Scatter3d(
-                                x=cluster_points[:, 0],
-                                y=cluster_points[:, 1],
-                                z=cluster_points[:, 2],
-                                mode='markers',
-                                marker=dict(size=6),
-                                name=f'Cluster {i}'
-                            ))
-                        centroids_pca = pca_3d.transform(kmeans.cluster_centers_)
-                        fig_3d.add_trace(go.Scatter3d(
-                            x=centroids_pca[:, 0],
-                            y=centroids_pca[:, 1],
-                            z=centroids_pca[:, 2],
-                            mode='markers',
-                            marker=dict(color='black', size=10, symbol='diamond'),
-                            name='Centroids'
-                        ))
-                        loadings = pca_3d.components_.T * np.sqrt(pca_3d.explained_variance_)
-                        data_range = np.max(np.abs(X_pca_3d))
-                        loading_range = np.max(np.abs(loadings))
-                        scaling_factor = (data_range / loading_range) * 0.8
-                        for i, feature in enumerate(feature_names):
-                            fig_3d.add_trace(go.Scatter3d(
-                                x=[0, loadings[i, 0] * scaling_factor],
-                                y=[0, loadings[i, 1] * scaling_factor],
-                                z=[0, loadings[i, 2] * scaling_factor],
-                                mode='lines+text',
-                                line=dict(color='red', width=3),
-                                text=['', feature],
-                                textposition='top center',
-                                textfont=dict(size=12),
-                                name=f'Loading {feature}',
-                                showlegend=False
-                            ))
-                        fig_3d.update_layout(
-                            title='3D PCA of Clusters',
-                            scene=dict(
-                                xaxis_title=f'PC1 ({pca_3d.explained_variance_ratio_[0]:.2%})',
-                                yaxis_title=f'PC2 ({pca_3d.explained_variance_ratio_[1]:.2%})',
-                                zaxis_title=f'PC3 ({pca_3d.explained_variance_ratio_[2]:.2%})',
-                                camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                            ),
-                            width=1800,
-                            height=1200
-                        )
-                    else:
-                        for i in range(n_clusters):
-                            cluster_points = X_pca_3d[kmeans.labels_ == i]
-                            fig_3d.add_trace(go.Scatter(
-                                x=cluster_points[:, 0],
-                                y=cluster_points[:, 1],
-                                mode='markers',
-                                marker=dict(size=6),
-                                name=f'Cluster {i}'
-                            ))
-                        centroids_pca = pca_3d.transform(kmeans.cluster_centers_)
-                        fig_3d.add_trace(go.Scatter(
-                            x=centroids_pca[:, 0],
-                            y=centroids_pca[:, 1],
-                            mode='markers',
-                            marker=dict(color='black', size=10, symbol='diamond'),
-                            name='Centroids'
-                        ))
-                        loadings = pca_3d.components_.T * np.sqrt(pca_3d.explained_variance_)
-                        data_range = np.max(np.abs(X_pca_3d))
-                        loading_range = np.max(np.abs(loadings))
-                        scaling_factor = (data_range / loading_range) * 0.8
-                        for i, feature in enumerate(feature_names):
-                            fig_3d.add_trace(go.Scatter(
-                                x=[0, loadings[i, 0] * scaling_factor],
-                                y=[0, loadings[i, 1] * scaling_factor],
-                                mode='lines+text',
-                                line=dict(color='red', width=3),
-                                text=['', feature],
-                                textposition='top center',
-                                textfont=dict(size=12),
-                                name=f'Loading {feature}',
-                                showlegend=False
-                            ))
-                        fig_3d.update_layout(
-                            title='2D PCA of Clusters',
-                            xaxis_title=f'PC1 ({pca_3d.explained_variance_ratio_[0]:.2%})',
-                            yaxis_title=f'PC2 ({pca_3d.explained_variance_ratio_[1]:.2%})',
-                            width=1800,
-                            height=1200
-                        )
-                    fig_3d.update_layout(
-                        legend=dict(
-                            yanchor="top",
-                            y=0.99,
-                            xanchor="left",
-                            x=1.02,
-                            font=dict(size=12)
-                        ),
-                        margin=dict(l=0, r=0, t=30, b=0)
-                    )
-                    fig_3d.add_annotation(
-                        text="Red lines show feature loadings",
-                        xref="paper", yref="paper",
-                        x=0, y=1.05,
-                        showarrow=False,
-                        font=dict(size=14)
-                    )
-                    return fig_3d
-
-                fig_3d_pca = plot_3d_pca(state.X_scaled, state.n_clusters, kmeans, cluster_features if not use_pca else [f"PC{i+1}" for i in range(n_components)])
-                st.plotly_chart(fig_3d_pca)
-                st.subheader("Cluster Summary Statistics")
-                primary_element_for_cluster = st.selectbox("Select element for cluster comparison:", st.session_state.element_cols)
-                summary_stats = get_cluster_summary(st.session_state.merged_df, cluster_features, primary_element_for_cluster)
-                st.write(summary_stats.round(3))
-                st.subheader("Feature Distribution by Cluster")
-                use_log_scale_cluster = st.checkbox("Use log scale for boxplots", value=True)
-                fig_boxplots = plot_cluster_boxplots(st.session_state.merged_df, cluster_features, primary_element_for_cluster, use_log_scale_cluster)
-                st.plotly_chart(fig_boxplots)
-                if 'LITHO' in st.session_state.merged_df.columns:
-                    st.subheader("Lithology vs Cluster Comparison")
-                    fig_lith_cluster = plot_lithology_cluster_comparison(st.session_state.merged_df)
-                    st.plotly_chart(fig_lith_cluster)
-                st.subheader("3D Visualisation of Clusters")
-                if 'Cluster' in st.session_state.merged_df.columns:
-                    cluster_viz_df = st.session_state.viz_df.copy()
-                    cluster_viz_df = cluster_viz_df[cluster_viz_df['Cluster'] >= 0]
-                    if not cluster_viz_df.empty:
-                        viz_options = ["Clusters"]
-                        if 'primary_element_for_cluster' in locals():
-                            viz_options.append("Grade")
-                        if 'LITHO' in cluster_viz_df.columns:
-                            viz_options.append("Lithology")
-                        viz_type = st.multiselect(
-                        "Select visualisation types:",
-                        viz_options,
-                        default=["Clusters"],
-                        key="cluster_viz_type_selection"  
-                    )
-                        vertical_exaggeration = st.slider(
-                            "Vertical Exaggeration", 
-                            min_value=1.0, 
-                            max_value=10.0, 
-                            value=1.0, 
-                            step=0.1,
-                            key="cluster_viz_exaggeration_slider"
-                        )
-                        fig = go.Figure()
-                        viz_collar_df = st.session_state.collar_df.copy()
-                        offsets = {"Clusters": 0, "Grade": 20, "Lithology": -20}
-                        for v_type in viz_type:
-                            if v_type == "Clusters":
-                                for cluster in sorted(cluster_viz_df['Cluster'].unique()):
-                                    if cluster >= 0:
-                                        cluster_data = cluster_viz_df[cluster_viz_df['Cluster'] == cluster]
-                                        if not cluster_data.empty:
-                                            hover_text = []
-                                            for _, row in cluster_data.iterrows():
-                                                info = [
-                                                    f"<b>Hole ID:</b> {row['HOLE_ID']}",
-                                                    f"<b>Cluster:</b> {cluster}"
-                                                ]
-                                                if 'primary_element_for_cluster' in locals():
-                                                    info.append(f"<b>{primary_element_for_cluster}:</b> {row[primary_element_for_cluster]:.2f}")
-                                                info.append(f"<b>From:</b> {row['FROM']:.2f}")
-                                                info.append(f"<b>To:</b> {row['TO']:.2f}")
-                                                if 'LITHO' in row:
-                                                    info.append(f"<b>Lithology:</b> {row['LITHO']}")
-                                                hover_text.append("<br>".join(info))
-                                            fig.add_trace(go.Scatter3d(
-                                                x=cluster_data['x'] + offsets["Clusters"],
-                                                y=cluster_data['y'],
-                                                z=cluster_data['z'],
-                                                mode='markers',
-                                                marker=dict(
-                                                    size=8,
-                                                    color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)]
-                                                ),
-                                                name=f'Cluster {cluster}',
-                                                hovertemplate="%{text}<br>" +
-                                                            "<b>X:</b> %{x:.2f}<br>" +
-                                                            "<b>Y:</b> %{y:.2f}<br>" +
-                                                            "<b>Z:</b> %{z:.2f}<extra></extra>",
-                                                text=hover_text
-                                            ))
-                                for hole in cluster_viz_df['HOLE_ID'].unique():
-                                    hole_data = cluster_viz_df[cluster_viz_df['HOLE_ID'] == hole]
-                                    collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole]
-                                    if not collar_point.empty:
-                                        collar_point = collar_point.iloc[0]
-                                        x_line = [collar_point['EASTING'] + offsets["Clusters"]] + (hole_data['x'] + offsets["Clusters"]).tolist()
-                                        y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                                        z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                                        fig.add_trace(go.Scatter3d(
-                                            x=x_line, y=y_line, z=z_line,
-                                            mode='lines',
-                                            line=dict(color='gray', width=1),
-                                            showlegend=False
-                                        ))
-                                add_collar_points(fig, viz_collar_df, x_offset=offsets["Clusters"])
-                            elif v_type == "Grade" and 'primary_element_for_cluster' in locals():
-                                use_log_scale = st.checkbox("Use log scale for grade", value=True, key="cluster_grade_log")
-                                add_grade_visualisation(fig, cluster_viz_df, primary_element_for_cluster, use_log_scale, "Combined", x_offset=offsets["Grade"])
-                                for hole in cluster_viz_df['HOLE_ID'].unique():
-                                    hole_data = cluster_viz_df[cluster_viz_df['HOLE_ID'] == hole]
-                                    collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole]
-                                    if not collar_point.empty:
-                                        collar_point = collar_point.iloc[0]
-                                        x_line = [collar_point['EASTING'] + offsets["Grade"]] + (hole_data['x'] + offsets["Grade"]).tolist()
-                                        y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                                        z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                                        fig.add_trace(go.Scatter3d(
-                                            x=x_line, y=y_line, z=z_line,
-                                            mode='lines',
-                                            line=dict(color='gray', width=1),
-                                            showlegend=False
-                                        ))
-                                add_collar_points(fig, viz_collar_df, x_offset=offsets["Grade"])
-                            elif v_type == "Lithology" and 'LITHO' in cluster_viz_df.columns:
-                                litho_viz_df = cluster_viz_df.copy()
-                                add_lithology_visualisation(fig, litho_viz_df, "Combined", None, st.session_state.litho_dict, x_offset=offsets["Lithology"])
-                                for hole in litho_viz_df['HOLE_ID'].unique():
-                                    hole_data = litho_viz_df[litho_viz_df['HOLE_ID'] == hole]
-                                    collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole]
-                                    if not collar_point.empty:
-                                        collar_point = collar_point.iloc[0]
-                                        x_line = [collar_point['EASTING'] + offsets["Lithology"]] + (hole_data['x'] + offsets["Lithology"]).tolist()
-                                        y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                                        z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                                        fig.add_trace(go.Scatter3d(
-                                            x=x_line, y=y_line, z=z_line,
-                                            mode='lines',
-                                            line=dict(color='gray', width=1),
-                                            showlegend=False
-                                        ))
-                                add_collar_points(fig, viz_collar_df, x_offset=offsets["Lithology"])
-                        update_figure_layout(fig, vertical_exaggeration)
-                        st.plotly_chart(fig)
-                    else:
-                        st.warning("No cluster data available for visualisation after applying filters.")
-            else:
-                st.warning("No cluster data available. Please run clustering analysis first.")
-        elif state.X_scaled is not None:
-            cluster_df = st.session_state.merged_df.copy() 
+        # --- Display Scree Plot and Get User Input for n_clusters ---
+        if state.get('wcss'):
             st.subheader("Clustering Scree Plot")
             st.plotly_chart(plot_scree(wcss=state.wcss, is_pca=False))
-            state.n_clusters = st.number_input("Select number of clusters", min_value=2, max_value=max_clusters, value=state.n_clusters)
+            
+            state.n_clusters = st.number_input(
+                "Select final number of clusters", 
+                min_value=2, 
+                max_value=max_clusters, 
+                value=state.n_clusters
+            )
+
+            # --- Finalize Clustering ---
+            just_completed_clustering = not st.session_state.get('clustering_completed', False)
+
             kmeans = KMeans(n_clusters=state.n_clusters, random_state=42, n_init=10)
             cluster_labels = kmeans.fit_predict(state.X_scaled)
-            st.session_state.saved_cluster_labels = pd.Series(cluster_labels, index=cluster_df.index) 
             
-
-            # Initialise all rows in merged_df to -1
-            # -----------------------------------------------------------------
-            # 1.  Give every row the default label -1
+            # =================================================================
+            # CORRECTED LOGIC: Reset cluster column before applying new labels
+            # This ensures that samples not in the current analysis subset are marked as unclustered.
             st.session_state.merged_df['Cluster'] = -1
-            st.session_state.viz_df  ['Cluster'] = -1
+            # =================================================================
 
-            # 2.  Push the K-means labels back into the rows that were clustered
-            #     (cluster_df is a straight copy of merged_df *before* clustering,
-            #      so they still share the same index.)
-            st.session_state.merged_df.loc[cluster_df.index, 'Cluster'] = cluster_labels
-            st.session_state.viz_df  .loc[cluster_df.index, 'Cluster'] = cluster_labels
-            # -----------------------------------------------------------------
+            # Create a pandas Series with the new cluster labels, using the correct index
+            labels_series = pd.Series(cluster_labels, index=state.clustered_data_index, name='Cluster')
 
+            # Update the main dataframe with the new cluster labels.
+            # .update() correctly uses the index to place the new labels.
+            st.session_state.merged_df.update(labels_series)
+            
             st.session_state.clustering_completed = True
+            
             if not use_pca:
-                if use_log_transform:
-                    cluster_centers = pd.DataFrame(
+                if use_log_transform and state.scaler:
+                    state.cluster_centers = pd.DataFrame(
                         np.exp(state.scaler.inverse_transform(kmeans.cluster_centers_)) - 1e-10,
                         columns=cluster_features
                     )
-                else:
-                    cluster_centers = pd.DataFrame(
+                elif state.scaler:
+                    state.cluster_centers = pd.DataFrame(
                         state.scaler.inverse_transform(kmeans.cluster_centers_),
                         columns=state.selected_cluster_features
                     )
+            
+            if just_completed_clustering:
+                st.rerun()
+
+        # --- Display All Results if Clustering is Complete ---
+        if st.session_state.get('clustering_completed'):
+            st.success(f"Clustering complete with {state.n_clusters} clusters.")
+            
+            if 'cluster_centers' in state and state.cluster_centers is not None:
                 st.write("Cluster Centers:")
-                st.write(cluster_centers)
-            st.subheader("3D PCA of Clusters")
-            def plot_3d_pca(X_scaled, n_clusters, kmeans, feature_names):
-                n_components_here = X_scaled.shape[1]
-                pca_3d = PCA(n_components=min(3, n_components_here))
-                X_pca_3d = pca_3d.fit_transform(X_scaled)
-                fig_3d = go.Figure()
-                if n_components_here >= 3:
-                    for i in range(n_clusters):
-                        cluster_points = X_pca_3d[kmeans.labels_ == i]
-                        fig_3d.add_trace(go.Scatter3d(
-                            x=cluster_points[:, 0],
-                            y=cluster_points[:, 1],
-                            z=cluster_points[:, 2],
-                            mode='markers',
-                            marker=dict(size=6),
-                            name=f'Cluster {i}'
-                        ))
-                    centroids_pca = pca_3d.transform(kmeans.cluster_centers_)
-                    fig_3d.add_trace(go.Scatter3d(
-                        x=centroids_pca[:, 0],
-                        y=centroids_pca[:, 1],
-                        z=centroids_pca[:, 2],
-                        mode='markers',
-                        marker=dict(color='black', size=10, symbol='diamond'),
-                        name='Centroids'
-                    ))
-                    loadings = pca_3d.components_.T * np.sqrt(pca_3d.explained_variance_)
-                    data_range = np.max(np.abs(X_pca_3d))
-                    loading_range = np.max(np.abs(loadings))
-                    scaling_factor = (data_range / loading_range) * 0.8
-                    for i, feature in enumerate(feature_names):
-                        fig_3d.add_trace(go.Scatter3d(
-                            x=[0, loadings[i, 0] * scaling_factor],
-                            y=[0, loadings[i, 1] * scaling_factor],
-                            z=[0, loadings[i, 2] * scaling_factor],
-                            mode='lines+text',
-                            line=dict(color='red', width=3),
-                            text=['', feature],
-                            textposition='top center',
-                            textfont=dict(size=12),
-                            name=f'Loading {feature}',
-                            showlegend=False
-                        ))
-                    fig_3d.update_layout(
-                        title='3D PCA of Clusters',
-                        scene=dict(
-                            xaxis_title=f'PC1 ({pca_3d.explained_variance_ratio_[0]:.2%})',
-                            yaxis_title=f'PC2 ({pca_3d.explained_variance_ratio_[1]:.2%})',
-                            zaxis_title=f'PC3 ({pca_3d.explained_variance_ratio_[2]:.2%})',
-                            camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                        ),
-                        width=1800,
-                        height=1200
-                    )
-                else:
-                    for i in range(n_clusters):
-                        cluster_points = X_pca_3d[kmeans.labels_ == i]
-                        fig_3d.add_trace(go.Scatter(
-                            x=cluster_points[:, 0],
-                            y=cluster_points[:, 1],
-                            mode='markers',
-                            marker=dict(size=6),
-                            name=f'Cluster {i}'
-                        ))
-                    centroids_pca = pca_3d.transform(kmeans.cluster_centers_)
-                    fig_3d.add_trace(go.Scatter(
-                        x=centroids_pca[:, 0],
-                        y=centroids_pca[:, 1],
-                        mode='markers',
-                        marker=dict(color='black', size=10, symbol='diamond'),
-                        name='Centroids'
-                    ))
-                    loadings = pca_3d.components_.T * np.sqrt(pca_3d.explained_variance_)
-                    data_range = np.max(np.abs(X_pca_3d))
-                    loading_range = np.max(np.abs(loadings))
-                    scaling_factor = (data_range / loading_range) * 0.8
-                    for i, feature in enumerate(feature_names):
-                        fig_3d.add_trace(go.Scatter(
-                            x=[0, loadings[i, 0] * scaling_factor],
-                            y=[0, loadings[i, 1] * scaling_factor],
-                            mode='lines+text',
-                            line=dict(color='red', width=3),
-                            text=['', feature],
-                            textposition='top center',
-                            textfont=dict(size=12),
-                            name=f'Loading {feature}',
-                            showlegend=False
-                        ))
-                    fig_3d.update_layout(
-                        title='2D PCA of Clusters',
-                        xaxis_title=f'PC1 ({pca_3d.explained_variance_ratio_[0]:.2%})',
-                        yaxis_title=f'PC2 ({pca_3d.explained_variance_ratio_[1]:.2%})',
-                        width=1800,
-                        height=1200
-                    )
-                fig_3d.update_layout(
-                    legend=dict(
-                        yanchor="top",
-                        y=0.99,
-                        xanchor="left",
-                        x=1.02,
-                        font=dict(size=12)
-                    ),
-                    margin=dict(l=0, r=0, t=30, b=0)
-                )
-                fig_3d.add_annotation(
-                    text="Red lines show feature loadings",
-                    xref="paper", yref="paper",
-                    x=0, y=1.05,
-                    showarrow=False,
-                    font=dict(size=14)
-                )
-                return fig_3d
-
-            fig_3d_pca = plot_3d_pca(state.X_scaled, state.n_clusters, kmeans, cluster_features if not use_pca else [f"PC{i+1}" for i in range(n_components)])
-            st.plotly_chart(fig_3d_pca)
+                st.write(state.cluster_centers)
+            
             st.subheader("Cluster Summary Statistics")
-            primary_element_for_cluster = st.selectbox("Select element for cluster comparison:", st.session_state.element_cols)
-            summary_stats = get_cluster_summary(st.session_state.merged_df, cluster_features, primary_element_for_cluster)
-            st.write(summary_stats.round(3))
-            st.subheader("Feature Distribution by Cluster")
-            use_log_scale_cluster = st.checkbox("Use log scale for boxplots", value=True)
-            fig_boxplots = plot_cluster_boxplots(st.session_state.merged_df, cluster_features, primary_element_for_cluster, use_log_scale_cluster)
-            st.plotly_chart(fig_boxplots)
-            if 'LITHO' in st.session_state.merged_df.columns:
-                st.subheader("Lithology vs Cluster Comparison")
-                fig_lith_cluster = plot_lithology_cluster_comparison(st.session_state.merged_df)
-                st.plotly_chart(fig_lith_cluster)
-            st.subheader("3D Visualisation of Clusters")
-            if 'Cluster' in st.session_state.merged_df.columns:
-                cluster_viz_df = st.session_state.viz_df.copy()
-                cluster_viz_df = cluster_viz_df[cluster_viz_df['Cluster'] >= 0]
-                if not cluster_viz_df.empty:
-                    viz_options = ["Clusters"]
-                    if 'primary_element_for_cluster' in locals():
-                        viz_options.append("Grade")
-                    if 'LITHO' in cluster_viz_df.columns:
-                        viz_options.append("Lithology")
-                    viz_type = st.multiselect(
-                        "Select visualisation types:",
-                        viz_options,
-                        default=["Clusters"],
-                        key="previous_cluster_viz_type_selection"
-                    )
-                    vertical_exaggeration = st.slider(
-                        "Vertical Exaggeration", 
-                        min_value=1.0, 
-                        max_value=10.0, 
-                        value=1.0, 
-                        step=0.1,
-                        key="cluster_viz_exaggeration_previous"
-                    )
-                    fig = go.Figure()
-                    viz_collar_df = st.session_state.collar_df.copy()
-                    offsets = {"Clusters": 0, "Grade": 20, "Lithology": -20}
-                    for v_type in viz_type:
-                        if v_type == "Clusters":
-                            for cluster in sorted(cluster_viz_df['Cluster'].unique()):
-                                if cluster >= 0:
-                                    cluster_data = cluster_viz_df[cluster_viz_df['Cluster'] == cluster]
-                                    if not cluster_data.empty:
-                                        hover_text = []
-                                        for _, row in cluster_data.iterrows():
-                                            info = [
-                                                f"<b>Hole ID:</b> {row['HOLE_ID']}",
-                                                f"<b>Cluster:</b> {cluster}"
-                                            ]
-                                            if 'primary_element_for_cluster' in locals():
-                                                info.append(f"<b>{primary_element_for_cluster}:</b> {row[primary_element_for_cluster]:.2f}")
-                                            info.append(f"<b>From:</b> {row['FROM']:.2f}")
-                                            info.append(f"<b>To:</b> {row['TO']:.2f}")
-                                            if 'LITHO' in row:
-                                                info.append(f"<b>Lithology:</b> {row['LITHO']}")
-                                            hover_text.append("<br>".join(info))
-                                        fig.add_trace(go.Scatter3d(
-                                            x=cluster_data['x'] + offsets["Clusters"],
-                                            y=cluster_data['y'],
-                                            z=cluster_data['z'],
-                                            mode='markers',
-                                            marker=dict(
-                                                size=8,
-                                                color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)]
-                                            ),
-                                            name=f'Cluster {cluster}',
-                                            hovertemplate="%{text}<br>" +
-                                                        "<b>X:</b> %{x:.2f}<br>" +
-                                                        "<b>Y:</b> %{y:.2f}<br>" +
-                                                        "<b>Z:</b> %{z:.2f}<extra></extra>",
-                                            text=hover_text
-                                        ))
-                            for hole in cluster_viz_df['HOLE_ID'].unique():
-                                hole_data = cluster_viz_df[cluster_viz_df['HOLE_ID'] == hole]
-                                collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole]
-                                if not collar_point.empty:
-                                    collar_point = collar_point.iloc[0]
-                                    x_line = [collar_point['EASTING'] + offsets["Clusters"]] + (hole_data['x'] + offsets["Clusters"]).tolist()
-                                    y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                                    z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                                    fig.add_trace(go.Scatter3d(
-                                        x=x_line, y=y_line, z=z_line,
-                                        mode='lines',
-                                        line=dict(color='gray', width=1),
-                                        showlegend=False
-                                    ))
-                            add_collar_points(fig, viz_collar_df, x_offset=offsets["Clusters"])
-                        elif v_type == "Grade" and 'primary_element_for_cluster' in locals():
-                            use_log_scale = st.checkbox("Use log scale for grade", value=True, key="previous_cluster_grade_log")
-                            add_grade_visualisation(fig, cluster_viz_df, primary_element_for_cluster, use_log_scale, "Combined", color_by='grade', x_offset=offsets["Grade"])
-                            for hole in cluster_viz_df['HOLE_ID'].unique():
-                                hole_data = cluster_viz_df[cluster_viz_df['HOLE_ID'] == hole]
-                                collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole]
-                                if not collar_point.empty:
-                                    collar_point = collar_point.iloc[0]
-                                    x_line = [collar_point['EASTING'] + offsets["Grade"]] + (hole_data['x'] + offsets["Grade"]).tolist()
-                                    y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                                    z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                                    fig.add_trace(go.Scatter3d(
-                                        x=x_line, y=y_line, z=z_line,
-                                        mode='lines',
-                                        line=dict(color='gray', width=1),
-                                        showlegend=False
-                                    ))
-                            add_collar_points(fig, viz_collar_df, x_offset=offsets["Grade"])
-                        elif v_type == "Lithology" and 'LITHO' in cluster_viz_df.columns:
-                            add_lithology_visualisation(fig, cluster_viz_df, "Combined", None, st.session_state.litho_dict, x_offset=offsets["Lithology"])
-                            for hole in cluster_viz_df['HOLE_ID'].unique():
-                                hole_data = cluster_viz_df[cluster_viz_df['HOLE_ID'] == hole]
-                                collar_point = viz_collar_df[viz_collar_df['HOLE_ID'] == hole]
-                                if not collar_point.empty:
-                                    collar_point = collar_point.iloc[0]
-                                    x_line = [collar_point['EASTING'] + offsets["Lithology"]] + (hole_data['x'] + offsets["Lithology"]).tolist()
-                                    y_line = [collar_point['NORTHING']] + hole_data['y'].tolist()
-                                    z_line = [collar_point['ELEVATION']] + hole_data['z'].tolist()
-                                    fig.add_trace(go.Scatter3d(
-                                        x=x_line, y=y_line, z=z_line,
-                                        mode='lines',
-                                        line=dict(color='gray', width=1),
-                                        showlegend=False
-                                    ))
-                            add_collar_points(fig, viz_collar_df, x_offset=offsets["Lithology"])
-                    update_figure_layout(fig, vertical_exaggeration)
-                    st.plotly_chart(fig, key="previous_cluster_viz_plot")
+            primary_element_for_cluster = st.selectbox("Select element for cluster comparison:", st.session_state.element_cols, key="cluster_summary_element_final")
+            
+            # For the summary, only show the data that was actually clustered in this run
+            summary_df = st.session_state.merged_df[st.session_state.merged_df['Cluster'] >= 0]
+            
+            if not summary_df.empty:
+                summary_stats = get_cluster_summary(summary_df, state.selected_cluster_features, primary_element_for_cluster)
+                st.write(summary_stats.round(3))
 
-                    # Store figure and add download button
-                    st.session_state.cluster_3d_figure = fig
-                    html_string, filename = create_html_download(fig, "cluster_visualisation")
-                    st.download_button(
-                        label="🔬 Download Cluster Plot (HTML)",
-                        data=html_string,
-                        file_name=filename,
-                        mime="text/html",
-                        help="Download interactive cluster plot as HTML file",
-                        key="download_cluster_viz"
-                    )
-                    
+                st.subheader("Feature Distribution by Cluster")
+                use_log_scale_cluster = st.checkbox("Use log scale for boxplots", value=True, key="cluster_boxplot_log_final")
+                fig_boxplots = plot_cluster_boxplots(summary_df, state.selected_cluster_features, primary_element_for_cluster, use_log_scale_cluster)
+                st.plotly_chart(fig_boxplots)
+                
+                if 'LITHO' in summary_df.columns:
+                    st.subheader("Lithology vs Cluster Comparison")
+                    fig_lith_cluster = plot_lithology_cluster_comparison(summary_df)
+                    st.plotly_chart(fig_lith_cluster)
+                
+                # --- 3D VISUALIZATION BLOCK ---
+                st.subheader("3D Visualisation of Clusters")
+                viz_options = ["Clusters"]
+                if primary_element_for_cluster:
+                    viz_options.append("Grade")
+                if 'LITHO' in summary_df.columns:
+                    viz_options.append("Lithology")
+                
+                selected_viz_cluster = st.multiselect(
+                    "Select visualisation types:",
+                    viz_options,
+                    default=["Clusters"],
+                    key="cluster_viz_type_selection"
+                )
+                
+                vertical_exaggeration_cluster = st.slider(
+                    "Vertical Exaggeration", 
+                    min_value=1.0, 
+                    max_value=10.0, 
+                    value=1.0, 
+                    step=0.1,
+                    key="cluster_viz_exaggeration_slider"
+                )
 
-                    st.markdown("---")  
-                    st.markdown("<h4 style='color: #2a5298;'>✂️ Cluster Cross Sections</h4>", unsafe_allow_html=True)
-                    
-                    st.write("Create cross sections showing cluster distribution along drill fence lines.")
-                    
-                    # Get unique hole coordinates for fence selection
-                    hole_coords_cluster = st.session_state.collar_df[['HOLE_ID', 'EASTING', 'NORTHING']].copy()
-                    
-                    col1_cluster, col2_cluster = st.columns([2, 1])
-                    
-                    with col1_cluster:
-                        st.write("**Select holes for cluster cross section:**")
-                        selected_holes_cluster_cross = st.multiselect(
-                            "Choose holes for fence line (minimum 2 required):",
-                            hole_coords_cluster['HOLE_ID'].tolist(),
-                            default=hole_coords_cluster['HOLE_ID'].tolist()[:3] if len(hole_coords_cluster) >= 3 else hole_coords_cluster['HOLE_ID'].tolist(),
-                            key="cluster_cross_section_holes"
-                        )
-                    
-                    with col2_cluster:
-                        # Section width
-                        section_width_cluster = st.slider("Section Width (m)", min_value=10.0, max_value=200.0, value=50.0, step=10.0, key="cluster_cross_section_width")
-                        
-                        # Additional display options
-                        show_lithology = False
-                        show_grades = False
-                        primary_element_cluster_cross = None
-                        use_log_scale_cluster_cross = True
-                        
-                        # Check if lithology data is available
-                        if (st.session_state.viz_litho_df is not None and 
-                            not st.session_state.viz_litho_df.empty and 
-                            'LITHO' in st.session_state.merged_df.columns):
-                            show_lithology = st.checkbox("Show lithology (left side)", value=True, key="cluster_cross_show_litho")
-                        
-                        if st.session_state.analysis_mode in ["collar_assay", "all"] and st.session_state.element_cols:
-                            show_grades = st.checkbox("Show grades (right side)", value=False, key="cluster_cross_show_grades")
-                            if show_grades:
-                                primary_element_cluster_cross = st.selectbox("Grade element:", st.session_state.element_cols, key="cluster_cross_section_element")
-                                use_log_scale_cluster_cross = st.checkbox("Use log scale for grades", value=True, key="cluster_cross_section_log")
-                    
-                    if len(selected_holes_cluster_cross) >= 2:
-                        fence_holes_cluster = hole_coords_cluster[hole_coords_cluster['HOLE_ID'].isin(selected_holes_cluster_cross)]
-                        
-                        # Use first and last holes from the selected list
-                        first_hole_cluster = fence_holes_cluster[fence_holes_cluster['HOLE_ID'] == selected_holes_cluster_cross[0]].iloc[0]
-                        last_hole_cluster = fence_holes_cluster[fence_holes_cluster['HOLE_ID'] == selected_holes_cluster_cross[-1]].iloc[0]
-                        
-                        section_line_start_cluster = [first_hole_cluster['EASTING'], first_hole_cluster['NORTHING']]
-                        section_line_end_cluster = [last_hole_cluster['EASTING'], last_hole_cluster['NORTHING']]
-                        
-                        st.success(f"Cluster cross section from **{first_hole_cluster['HOLE_ID']}** to **{last_hole_cluster['HOLE_ID']}** ({len(selected_holes_cluster_cross)} holes selected)")
-                        
-                        # Show section line on map
-                        st.subheader("Cross Section Location")
-                        map_fig_cluster = create_section_line_map(
-                            st.session_state.merged_df, 
-                            st.session_state.collar_df,
-                            section_line_start_cluster, 
-                            section_line_end_cluster, 
-                            section_width_cluster
-                        )
-                        
-                        # Highlight selected holes and color by cluster if available
-                        if 'Cluster' in st.session_state.merged_df.columns:
-                            # Add cluster information to the map
-                            cluster_hole_info = st.session_state.merged_df.groupby('HOLE_ID')['Cluster'].agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else -1).reset_index()
-                            selected_hole_coords_cluster = hole_coords_cluster[hole_coords_cluster['HOLE_ID'].isin(selected_holes_cluster_cross)]
-                            selected_hole_coords_cluster = selected_hole_coords_cluster.merge(cluster_hole_info, on='HOLE_ID', how='left')
-                            
-                            for cluster in sorted(selected_hole_coords_cluster['Cluster'].unique()):
-                                if cluster >= 0:
-                                    cluster_holes = selected_hole_coords_cluster[selected_hole_coords_cluster['Cluster'] == cluster]
-                                    map_fig_cluster.add_trace(go.Scatter(
-                                        x=cluster_holes['EASTING'],
-                                        y=cluster_holes['NORTHING'],
-                                        mode='markers+text',
-                                        marker=dict(size=12, color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)], symbol='triangle-up'),
-                                        text=cluster_holes['HOLE_ID'],
-                                        textposition='top center',
-                                        name=f'Cluster {cluster} Holes',
-                                        hovertemplate="<b>Hole:</b> %{text}<br><b>Cluster:</b> " + str(cluster) + "<extra></extra>"
-                                    ))
-                        
-                        st.plotly_chart(map_fig_cluster, use_container_width=True)
-                        
-                        # Generate cross-section
-                        if st.button("Generate Cluster Cross Section", type="primary", key="generate_cluster_cross_section"):
-                            with st.spinner("Generating cluster cross-section..."):
-                                # Create cluster cross section
-                                cluster_cross_df = st.session_state.merged_df[st.session_state.merged_df['Cluster'] >= 0].copy()
+                active_collars = st.session_state.collar_df[st.session_state.collar_df['HOLE_ID'].isin(summary_df['HOLE_ID'].unique())]
+                active_litho_viz = st.session_state.viz_litho_df[st.session_state.viz_litho_df['HOLE_ID'].isin(summary_df['HOLE_ID'].unique())] if st.session_state.viz_litho_df is not None else None
+
+                fig_3d_cluster = create_combined_3d_visualisation(
+                    df=summary_df,
+                    collar_df=active_collars,
+                    viz_litho_df=active_litho_viz,
+                    litho_dict=st.session_state.litho_dict,
+                    selected_viz=selected_viz_cluster,
+                    primary_element=primary_element_for_cluster,
+                    use_log_scale=use_log_scale_cluster,
+                    vertical_exaggeration=vertical_exaggeration_cluster,
+                    legend_title="Cluster Plot"
+                )
+
+                st.plotly_chart(fig_3d_cluster)
+                
+                html_string, filename = create_html_download(fig_3d_cluster, "cluster_visualisation")
+                st.download_button(
+                    label="🔬 Download Cluster Plot (HTML)",
+                    data=html_string,
+                    file_name=filename,
+                    mime="text/html",
+                    key="download_cluster_viz"
+                )
                                 
-                                # Calculate section line parameters
-                                start_x, start_y = section_line_start_cluster
-                                end_x, end_y = section_line_end_cluster
-                                line_dx = end_x - start_x
-                                line_dy = end_y - start_y
-                                line_length = np.sqrt(line_dx**2 + line_dy**2)
-                                
-                                if line_length == 0:
-                                    st.error("Section line start and end points cannot be the same")
-                                else:
-                                    # Unit vectors
-                                    line_unit_x = line_dx / line_length
-                                    line_unit_y = line_dy / line_length
-                                    perp_unit_x = -line_unit_y
-                                    perp_unit_y = line_unit_x
-                                    
-                                    # Filter data points within section width
-                                    section_data = []
-                                    for idx, row in cluster_cross_df.iterrows():
-                                        to_point_x = row['x'] - start_x
-                                        to_point_y = row['y'] - start_y
-                                        along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
-                                        perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
-                                        
-                                        if (abs(perp_dist) <= section_width_cluster/2 and 
-                                            0 <= along_line <= line_length):
-                                            row_dict = row.to_dict()
-                                            row_dict['section_distance'] = along_line
-                                            row_dict['perp_distance'] = perp_dist
-                                            section_data.append(row_dict)
-                                    
-                                    if section_data:
-                                        section_df = pd.DataFrame(section_data)
-                                        
-                                        # Create the cross-section plot
-                                        fig_cross_cluster = go.Figure()
-                                        
-                                        # Offset for displaying different data types
-                                        cluster_offset = 0       # Clusters on drill trace (center)
-                                        litho_offset = -5        # Lithology on left side
-                                        grade_offset = 5         # Grades on right side
-                                        
-                                        # Add lithology intervals if selected and available
-                                        if (show_lithology and 
-                                            st.session_state.viz_litho_df is not None and 
-                                            not st.session_state.viz_litho_df.empty):
-                                            
-                                            # Filter lithology data for the cross section
-                                            litho_section_data = []
-                                            for idx, row in st.session_state.viz_litho_df.iterrows():
-                                                to_point_x = row['x'] - start_x
-                                                to_point_y = row['y'] - start_y
-                                                along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
-                                                perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
-                                                
-                                                if (abs(perp_dist) <= section_width_cluster/2 and 
-                                                    0 <= along_line <= line_length):
-                                                    row_dict = row.to_dict()
-                                                    row_dict['section_distance'] = along_line
-                                                    row_dict['perp_distance'] = perp_dist
-                                                    litho_section_data.append(row_dict)
-                                            
-                                            if litho_section_data:
-                                                litho_section_df = pd.DataFrame(litho_section_data)
-                                                
-                                                # Group by hole and create lithology intervals
-                                                unique_lithos = litho_section_df['LITHO'].unique()
-                                                color_palette = px.colors.qualitative.Set1
-                                                litho_colors = {litho: color_palette[i % len(color_palette)] for i, litho in enumerate(unique_lithos)}
-                                                
-                                                legend_added = set()
-                                                
-                                                for hole_id in litho_section_df['HOLE_ID'].unique():
-                                                    hole_litho_data = litho_section_df[litho_section_df['HOLE_ID'] == hole_id].sort_values('FROM')
-                                                    
-                                                    for _, interval in hole_litho_data.iterrows():
-                                                        litho_code = interval['LITHO']
-                                                        # Safe handling of litho_dict
-                                                        litho_desc = ""
-                                                        if st.session_state.litho_dict and litho_code in st.session_state.litho_dict:
-                                                            litho_desc = st.session_state.litho_dict[litho_code]
-                                                        legend_name = f"{litho_code} {litho_desc}".strip() if litho_desc else litho_code
-                                                        
-                                                        show_legend = legend_name not in legend_added
-                                                        if show_legend:
-                                                            legend_added.add(legend_name)
-                                                        
-                                                        # Calculate interval positions in 3D space
-                                                        azimuth_rad = np.radians(90 - interval['AZIMUTH'])
-                                                        dip_rad = np.radians(-interval['DIP'])
-                                                        
-                                                        # FROM point
-                                                        from_depth = interval['FROM']
-                                                        from_dx = from_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
-                                                        from_dy = from_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
-                                                        from_dz = from_depth * np.sin(dip_rad)
-                                                        from_x = interval['EASTING'] + from_dx
-                                                        from_y = interval['NORTHING'] + from_dy
-                                                        from_z = interval['ELEVATION'] - from_dz
-                                                        
-                                                        # TO point
-                                                        to_depth = interval['TO']
-                                                        to_dx = to_depth * np.cos(dip_rad) * np.cos(azimuth_rad)
-                                                        to_dy = to_depth * np.cos(dip_rad) * np.sin(azimuth_rad)
-                                                        to_dz = to_depth * np.sin(dip_rad)
-                                                        to_x = interval['EASTING'] + to_dx
-                                                        to_y = interval['NORTHING'] + to_dy
-                                                        to_z = interval['ELEVATION'] - to_dz
-                                                        
-                                                        # Project onto section line
-                                                        from_to_point_x = from_x - start_x
-                                                        from_to_point_y = from_y - start_y
-                                                        from_along = from_to_point_x * line_unit_x + from_to_point_y * line_unit_y
-                                                        
-                                                        to_to_point_x = to_x - start_x
-                                                        to_to_point_y = to_y - start_y
-                                                        to_along = to_to_point_x * line_unit_x + to_to_point_y * line_unit_y
-                                                        
-                                                        # Add lithology intervals on left side
-                                                        fig_cross_cluster.add_trace(go.Scatter(
-                                                            x=[from_along + litho_offset, to_along + litho_offset],
-                                                            y=[from_z, to_z],
-                                                            mode='lines',
-                                                            line=dict(width=20, color=litho_colors[litho_code]),
-                                                            name=legend_name,
-                                                            legendgroup=f"litho_{legend_name}",
-                                                            showlegend=show_legend,
-                                                            hovertemplate=(
-                                                                f"<b>Hole:</b> {hole_id}<br>" +
-                                                                f"<b>Lithology:</b> {legend_name}<br>" +
-                                                                f"<b>From:</b> {interval['FROM']:.1f}m<br>" +
-                                                                f"<b>To:</b> {interval['TO']:.1f}m<br>" +
-                                                                "<extra></extra>"
-                                                            )
-                                                        ))
-                                        
-                                        # Add grades if selected
-                                        if show_grades and primary_element_cluster_cross:
-                                            hover_text_grade = []
-                                            for _, row in section_df.iterrows():
-                                                info = [
-                                                    f"<b>Hole ID:</b> {row['HOLE_ID']}",
-                                                    f"<b>{primary_element_cluster_cross}:</b> {row[primary_element_cluster_cross]:.2f}",
-                                                    f"<b>Cluster:</b> {row['Cluster']}",
-                                                    f"<b>From:</b> {row['FROM']:.2f}m",
-                                                    f"<b>To:</b> {row['TO']:.2f}m",
-                                                    f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
-                                                ]
-                                                hover_text_grade.append("<br>".join(info))
-                                            
-                                            # Color scale for grades
-                                            color_values = section_df[primary_element_cluster_cross]
-                                            min_val = section_df[primary_element_cluster_cross].min()
-                                            max_val = section_df[primary_element_cluster_cross].max()
-                                            
-                                            if use_log_scale_cluster_cross and min_val > 0:
-                                                log_min = np.floor(np.log10(min_val))
-                                                log_max = np.ceil(np.log10(max_val))
-                                                tick_vals = []
-                                                tick_text = []
-                                                for i in range(int(log_min), int(log_max) + 1):
-                                                    current = 10**i
-                                                    if min_val <= current <= max_val:
-                                                        tick_vals.append(current)
-                                                        tick_text.append(f'{current:.3g}')
-                                                if min_val not in tick_vals:
-                                                    tick_vals.insert(0, min_val)
-                                                    tick_text.insert(0, f'{min_val:.2f}')
-                                                if max_val not in tick_vals:
-                                                    tick_vals.append(max_val)
-                                                    tick_text.append(f'{max_val:.2f}')
-                                            else:
-                                                tick_vals = np.linspace(min_val, max_val, 6)
-                                                tick_text = [f'{v:.3f}' for v in tick_vals]
-                                            
-                                            # Add grade points on right side
-                                            fig_cross_cluster.add_trace(go.Scatter(
-                                                x=section_df['section_distance'] + grade_offset,
-                                                y=section_df['z'],
-                                                mode='markers',
-                                                marker=dict(
-                                                    size=12,
-                                                    color=color_values,
-                                                    colorscale='rdylbu',
-                                                    reversescale=True,
-                                                    showscale=True,
-                                                    colorbar=dict(
-                                                        title=f"{primary_element_cluster_cross} Grade",
-                                                        len=0.75,
-                                                        tickmode='array',
-                                                        tickvals=tick_vals,
-                                                        ticktext=tick_text,
-                                                        x=1.02
-                                                    ),
-                                                    cmin=min_val,
-                                                    cmax=max_val,
-                                                    symbol='square'
-                                                ),
-                                                text=hover_text_grade,
-                                                hovertemplate="%{text}<extra></extra>",
-                                                name=f'{primary_element_cluster_cross} Grade'
-                                            ))
-                                        
-                                        
-                                        # Add drill hole traces
-                                        collar_section_data = []
-                                        for idx, row in st.session_state.collar_df.iterrows():
-                                            to_point_x = row['EASTING'] - start_x
-                                            to_point_y = row['NORTHING'] - start_y
-                                            along_line = to_point_x * line_unit_x + to_point_y * line_unit_y
-                                            perp_dist = to_point_x * perp_unit_x + to_point_y * perp_unit_y
-                                            
-                                            if (abs(perp_dist) <= section_width_cluster/2 and 
-                                                0 <= along_line <= line_length):
-                                                collar_section_data.append({
-                                                    'HOLE_ID': row['HOLE_ID'],
-                                                    'section_distance': along_line,
-                                                    'elevation': row['ELEVATION'],
-                                                    'perp_distance': perp_dist
-                                                })
-                                        
-                                        collar_section_dict = {c['HOLE_ID']: c for c in collar_section_data}
-                                        
-                                        # Add drill traces
-                                        for hole_id in section_df['HOLE_ID'].unique():
-                                            hole_data = section_df[section_df['HOLE_ID'] == hole_id].sort_values('FROM')
-                                            
-                                            if hole_id in collar_section_dict:
-                                                collar_point = collar_section_dict[hole_id]
-                                                trace_points = [(collar_point['section_distance'], collar_point['elevation'])]
-                                                for _, row in hole_data.iterrows():
-                                                    trace_points.append((row['section_distance'], row['z']))
-                                                
-                                                trace_x, trace_y = zip(*trace_points)
-                                                fig_cross_cluster.add_trace(go.Scatter(
-                                                    x=trace_x,
-                                                    y=trace_y,
-                                                    mode='lines',
-                                                    line=dict(color='gray', width=2),
-                                                    showlegend=False,
-                                                    hoverinfo='skip',
-                                                    name=f'Trace {hole_id}'
-                                                ))
-                                        # Add cluster points ON the drill trace (center)
-                                        for cluster in sorted(section_df['Cluster'].unique()):
-                                            if cluster >= 0:
-                                                cluster_data = section_df[section_df['Cluster'] == cluster]
-                                                
-                                                hover_text = []
-                                                for _, row in cluster_data.iterrows():
-                                                    info = [
-                                                        f"<b>Hole ID:</b> {row['HOLE_ID']}",
-                                                        f"<b>Cluster:</b> {cluster}",
-                                                        f"<b>From:</b> {row['FROM']:.2f}m",
-                                                        f"<b>To:</b> {row['TO']:.2f}m",
-                                                        f"<b>Distance along section:</b> {row['section_distance']:.1f}m"
-                                                    ]
-                                                    # Safe handling of LITHO column
-                                                    if 'LITHO' in row and pd.notna(row['LITHO']):
-                                                        info.append(f"<b>Lithology:</b> {row['LITHO']}")
-                                                    if primary_element_cluster_cross and primary_element_cluster_cross in row:
-                                                        info.append(f"<b>{primary_element_cluster_cross}:</b> {row[primary_element_cluster_cross]:.2f}")
-                                                    hover_text.append("<br>".join(info))
-                                                
-                                                fig_cross_cluster.add_trace(go.Scatter(
-                                                    x=cluster_data['section_distance'] + cluster_offset,
-                                                    y=cluster_data['z'],
-                                                    mode='markers',
-                                                    marker=dict(
-                                                        size=15,
-                                                        color=px.colors.qualitative.Set1[cluster % len(px.colors.qualitative.Set1)],
-                                                        symbol='circle',
-                                                        line=dict(width=2, color='black')  # Add black outline for visibility
-                                                    ),
-                                                    text=hover_text,
-                                                    hovertemplate="%{text}<extra></extra>",
-                                                    name=f'Cluster {cluster}'
-                                                ))                                        
-                                        # Add collar points
-                                        if collar_section_data:
-                                            collar_section_df = pd.DataFrame(collar_section_data)
-                                            fig_cross_cluster.add_trace(go.Scatter(
-                                                x=collar_section_df['section_distance'],
-                                                y=collar_section_df['elevation'],
-                                                mode='markers+text',
-                                                marker=dict(size=10, color='red', symbol='triangle-up'),
-                                                text=collar_section_df['HOLE_ID'],
-                                                textposition='top center',
-                                                textfont=dict(size=10, color='red'),
-                                                name='Collars',
-                                                hovertemplate="<b>Hole:</b> %{customdata}<br><b>Collar</b><extra></extra>",
-                                                customdata=collar_section_df['HOLE_ID']
-                                            ))
-                                        
-                                        # Calculate section azimuth for title
-                                        section_azimuth = np.degrees(np.arctan2(line_dx, line_dy))
-                                        if section_azimuth < 0:
-                                            section_azimuth += 360
-                                        
-                                        # Layout
-                                        fig_cross_cluster.update_layout(
-                                            title=f"Cluster Cross Section - Azimuth: {section_azimuth:.1f}° - Length: {line_length:.1f}m - Width: {section_width_cluster:.1f}m",
-                                            xaxis_title="Distance along section (m)",
-                                            yaxis_title="Elevation (m)",
-                                            height=900,
-                                            width=1600,
-                                            legend=dict(
-                                                yanchor="top",
-                                                y=0.99,
-                                                xanchor="left",
-                                                x=1.15,
-                                                bgcolor="rgba(255, 255, 255, 0.8)",
-                                                bordercolor="rgba(0, 0, 0, 0.3)",
-                                                borderwidth=1
-                                            ),
-                                            margin=dict(r=300, l=50, t=80, b=50)
-                                        )
-                                        
-                                        st.subheader("Cluster Cross Section")
-                                        st.plotly_chart(fig_cross_cluster, use_container_width=True)
-                                        
-                                        # Add explanatory text
-                                        explanation = "📍 **Reading the Cluster Cross Section:**\n"
-                                        explanation += "- **Gray lines** = Drill hole traces\n"
-                                        explanation += "- **Colored circles (center)** = Cluster assignments on drill traces\n"
-                                        if show_lithology:
-                                            explanation += "- **Left side (colored bars)** = Lithology intervals\n"
-                                        if show_grades:
-                                            explanation += "- **Right side (colored squares)** = Grade values\n"
-                                        explanation += "- **Red triangles** = Collar locations with hole IDs"
-                                        
-                                        st.info(explanation)
-                                    else:
-                                        st.warning("No cluster data found in the specified cross section area. Try adjusting the section width or selecting different holes.")
-                    else:
-                        st.warning("⚠️ Please select at least 2 holes to create a cluster cross section.")
-                else:
-                    st.warning("No cluster data available for visualisation after applying filters.")
-        else:
-            st.warning("No cluster data available. Please run clustering analysis first.")
+            else:
+                st.warning("No data with assigned clusters to display.")
+
+    else:
+        st.warning("Please load collar and assay data in the 'Data Loading' tab first.")
 
 with tab_download:
     st.markdown("<h2 style='color: #2a5298; border-bottom: 2px solid #2a5298; padding-bottom: 0.5rem;'>💾 Download Data</h2>", unsafe_allow_html=True)
